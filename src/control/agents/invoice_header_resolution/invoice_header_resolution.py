@@ -4,7 +4,7 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from src.control.agents.invoice_number_utils import (
+from src.control.agents.invoice_header_resolution.invoice_number_utils import (
     extract_invoice_number,
     generate_auto_invoice_number,
 )
@@ -14,15 +14,15 @@ from src.data.models.postgres.enums import (
     IssueType,
     ValidationIssueStatus,
 )
-from src.data.repositories.invoice_email_repository import (
+from src.data.repositories.invoice_header_resolution.invoice_email_repository import (
     InvoiceEmailRecord,
     InvoiceEmailRepository,
 )
-from src.data.repositories.invoice_repository import (
+from src.data.repositories.invoice_header_resolution.invoice_repository import (
     InvoiceRecord,
     InvoiceRepository,
 )
-from src.data.repositories.validation_issue_repository import (
+from src.data.repositories.shared.validation_issue_repository import (
     ValidationIssueCreate,
     ValidationIssueRepository,
 )
@@ -31,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 CHECK_STAGE = "invoice_header_resolution"
 MISSING_INVOICE_NUMBER = "MISSING_INVOICE_NUMBER"
+WAIVED_INVOICE_NUMBER_DESCRIPTION = (
+    "Original invoice number could not be recovered. "
+    "A system-generated invoice identifier was assigned to allow processing."
+)
 
 
 class InvoiceHeaderResolutionAgent:
@@ -183,9 +187,10 @@ class InvoiceHeaderResolutionAgent:
             invoice_id,
             auto_number,
         )
-        await self._validation_issue_repo.mark_issue_resolved(
+        await self._validation_issue_repo.mark_issue_waived(
             invoice_id,
             MISSING_INVOICE_NUMBER,
+            description=WAIVED_INVOICE_NUMBER_DESCRIPTION,
         )
 
         logger.warning(

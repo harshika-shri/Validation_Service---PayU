@@ -17,30 +17,32 @@ from src.data.models.postgres.enums import (
     ValidationFlowOutcome,
     ValidationIssueStatus,
 )
-from src.data.repositories.invoice_amount_repository import (
+from src.data.repositories.amount_validation.invoice_amount_repository import (
     InvoiceAmountRecord,
     InvoiceAmountRepository,
 )
-from src.data.repositories.invoice_line_amount_repository import (
+from src.data.repositories.amount_validation.invoice_line_amount_repository import (
     InvoiceLineAmountRecord,
     InvoiceLineAmountRepository,
 )
-from src.data.repositories.invoice_line_po_allocation_repository import (
+from src.data.repositories.po_resolution.invoice_line_allocation_candidate_repository import (
+    InvoiceLineAllocationCandidateRepository,
+)
+from src.data.repositories.po_resolution.invoice_line_po_allocation_repository import (
     AllocationRecord,
-    InvoiceLinePOAllocationRepository,
 )
-from src.data.repositories.invoice_po_mapping_repository import (
-    InvoicePOMappingRepository,
+from src.data.repositories.po_resolution.invoice_po_resolution_group_repository import (
+    InvoicePOResolutionGroupRepository,
 )
-from src.data.repositories.po_line_item_repository import (
+from src.data.repositories.po_resolution.po_line_item_repository import (
     POLineItemRecord,
     POLineItemRepository,
 )
-from src.data.repositories.purchase_order_repository import (
+from src.data.repositories.po_resolution.purchase_order_repository import (
     PurchaseOrderRecord,
     PurchaseOrderRepository,
 )
-from src.data.repositories.validation_issue_repository import (
+from src.data.repositories.shared.validation_issue_repository import (
     ValidationIssueCreate,
     ValidationIssueRepository,
 )
@@ -143,16 +145,16 @@ class AmountValidationAgent:
         self,
         invoice_amount_repo: InvoiceAmountRepository,
         invoice_line_amount_repo: InvoiceLineAmountRepository,
-        allocation_repo: InvoiceLinePOAllocationRepository,
-        invoice_po_mapping_repo: InvoicePOMappingRepository,
+        allocation_candidate_repo: InvoiceLineAllocationCandidateRepository,
+        resolution_group_repo: InvoicePOResolutionGroupRepository,
         po_line_item_repo: POLineItemRepository,
         purchase_order_repo: PurchaseOrderRepository,
         validation_issue_repo: ValidationIssueRepository,
     ) -> None:
         self._invoice_amount_repo = invoice_amount_repo
         self._invoice_line_amount_repo = invoice_line_amount_repo
-        self._allocation_repo = allocation_repo
-        self._invoice_po_mapping_repo = invoice_po_mapping_repo
+        self._allocation_candidate_repo = allocation_candidate_repo
+        self._resolution_group_repo = resolution_group_repo
         self._po_line_item_repo = po_line_item_repo
         self._purchase_order_repo = purchase_order_repo
         self._validation_issue_repo = validation_issue_repo
@@ -202,13 +204,15 @@ class AmountValidationAgent:
                 flow_outcome=flow_outcome,
             )
 
-        allocations = await self._allocation_repo.get_by_invoice_id(
-            invoice_id,
+        allocations = (
+            await self._allocation_candidate_repo.get_validation_allocations_for_invoice(
+                invoice_id,
+            )
         )
 
         if not allocations:
             logger.info(
-                "Skipping amount validation; no allocations found",
+                "Skipping amount validation; no allocation candidates found",
                 extra={
                     "invoice_id": str(invoice_id),
                 },
@@ -238,7 +242,7 @@ class AmountValidationAgent:
             )
         )
         po_ids = (
-            await self._invoice_po_mapping_repo.get_po_ids_by_invoice_id(
+            await self._resolution_group_repo.get_candidate_po_ids_for_validation(
                 invoice_id,
             )
         )
@@ -518,19 +522,9 @@ class AmountValidationAgent:
         )
 
         for allocation in allocations:
-            invoice_line = line_by_id.get(
-                allocation.invoice_line_item_id,
-            )
-
-            if invoice_line is None:
-                continue
-
             allocated_by_line[
                 allocation.invoice_line_item_id
-            ] += (
-                allocation.allocated_quantity
-                * invoice_line.unit_price
-            )
+            ] += allocation.allocated_amount
 
         for line_id, allocated_amount in (
             allocated_by_line.items()
@@ -565,7 +559,7 @@ class AmountValidationAgent:
                 PendingIssue(
                     issue_code=ALLOCATION_AMOUNT_MISMATCH,
                     check_name="allocation_amount_validation",
-                    field_name="allocated_quantity",
+                    field_name="allocated_amount",
                     issue_type=IssueType.MISMATCH,
                     expected_value=decimal_to_str(
                         expected,
@@ -1051,7 +1045,7 @@ class AmountValidationAgent:
                     expected_value=pending_issue.expected_value,
                     actual_value=pending_issue.actual_value,
                     description=pending_issue.description,
-                    status=ValidationIssueStatus.OPEN,
+                    status=ValidationIssueStatus.PENDING_REVIEW,
                 ),
             )
 

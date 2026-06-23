@@ -3,8 +3,8 @@ from uuid import UUID
 from pydantic import BaseModel, Field
 
 from src.data.models.postgres.enums import (
-    InvoiceStatus,
     InvoiceValidationDecision,
+    InvoiceValidationOutcome,
     ValidationFlowOutcome,
 )
 
@@ -26,5 +26,5 @@ class ValidationStateSchema(BaseModel):
     open_issue_codes: list[str] = Field(default_factory=list)
     flow_outcome: ValidationFlowOutcome = ValidationFlowOutcome.CONTINUE
     decision: InvoiceValidationDecision | None = None
-    invoice_status: InvoiceStatus | None = None
+    invoice_status: InvoiceValidationOutcome | None = None
     review_summary: ReviewSummarySchema | None = None

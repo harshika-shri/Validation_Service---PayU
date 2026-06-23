@@ -4,8 +4,8 @@ from typing import cast
 from uuid import UUID
 
 from src.data.models.postgres.enums import (
-    InvoiceStatus,
     InvoiceValidationDecision,
+    InvoiceValidationOutcome,
     ValidationFlowOutcome,
 )
 from src.schemas.validation_state_schema import (
@@ -73,7 +73,7 @@ def validation_state_to_schema(
             else None
         ),
         invoice_status=(
-            InvoiceStatus(
+            InvoiceValidationOutcome(
                 cast(
                     str,
                     invoice_status_value,

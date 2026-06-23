@@ -6,31 +6,31 @@ from typing import Any, Literal, cast
 
 from langgraph.graph import END, START, StateGraph
 
-from src.control.agents.amount_validation import (
+from src.control.agents.amount_validation.amount_validation import (
     AmountValidationAgent,
 )
-from src.control.agents.buyer_company_validation import (
+from src.control.agents.company_resolution.company_resolution import (
     BuyerCompanyValidationAgent,
 )
-from src.control.agents.duplicate_detection import (
+from src.control.agents.duplicate_detection.duplicate_detection import (
     DuplicateDetectionAgent,
 )
-from src.control.agents.final_decision import (
+from src.control.agents.final_decision.final_decision import (
     FinalDecisionAgent,
 )
-from src.control.agents.invoice_header_resolution import (
+from src.control.agents.invoice_header_resolution.invoice_header_resolution import (
     InvoiceHeaderResolutionAgent,
 )
-from src.control.agents.line_item_validation import (
+from src.control.agents.line_item_validation.line_item_validation import (
     LineItemValidationAgent,
 )
-from src.control.agents.po_resolution import (
+from src.control.agents.po_resolution.po_resolution import (
     POResolutionAgent,
 )
-from src.control.agents.review_summary_generation import (
+from src.control.agents.review_summary_generation.review_summary_generation import (
     ReviewSummaryGenerationAgent,
 )
-from src.control.agents.vendor_resolution import (
+from src.control.agents.vendor_resolution.vendor_resolution import (
     VendorResolutionAgent,
 )
 from src.control.graph.validation_state import (
@@ -50,7 +50,7 @@ from src.data.models.postgres.enums import (
     ValidationFlowOutcome,
     ValidationIssueStatus,
 )
-from src.data.repositories.validation_issue_repository import (
+from src.data.repositories.shared.validation_issue_repository import (
     ValidationIssueCreate,
     ValidationIssueRepository,
 )

@@ -4,12 +4,16 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Numeric, String, Text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.data.models.postgres.base import Base
-from src.data.models.postgres.enums import ExtractionStatus, InvoiceStatus
+from src.data.models.postgres.enums import (
+    ExtractionStatus,
+    InvoiceStatus,
+    InvoiceValidationOutcome,
+)
 from src.data.models.postgres.mixins import TimestampMixin
 from src.data.models.postgres.types import pg_enum
 
@@ -115,12 +119,17 @@ class Invoice(Base, TimestampMixin):
     )
 
     extraction_status: Mapped[ExtractionStatus] = mapped_column(
-        Enum(ExtractionStatus),
+        pg_enum(ExtractionStatus),
         nullable=False,
     )
 
     invoice_status: Mapped[InvoiceStatus | None] = mapped_column(
         pg_enum(InvoiceStatus),
+        nullable=True,
+    )
+
+    validation_outcome: Mapped[InvoiceValidationOutcome | None] = mapped_column(
+        pg_enum(InvoiceValidationOutcome),
         nullable=True,
     )
 

@@ -5,23 +5,25 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from src.control.agents.line_allocation_search import (
+from src.control.agents.po_resolution.line_allocation_search import (
     AllocationRecord,
 )
-from src.data.repositories.po_line_item_repository import (
+from src.data.repositories.po_resolution.po_line_item_repository import (
     POLineItemRecord,
 )
-from src.data.repositories.purchase_order_repository import (
+from src.data.repositories.po_resolution.purchase_order_repository import (
     PurchaseOrderRecord,
 )
 
 PO_CANDIDATE_CONTEXT_ISSUE_CODES = frozenset(
     {
-        "PO_NOT_FOUND",
+        "PO_MISSING",
+        "PO_RECOVERED",
         "PO_CLOSED",
         "PO_UNRESOLVED",
         "PO_AMBIGUOUS",
         "PO_VENDOR_CONFLICT",
+        "PO_RESOLUTION_BLOCKED",
         "INVALID_PO_REFERENCE",
         "MISSING_PO_COVERAGE",
         "UNMATCHED_LINE_ITEM",

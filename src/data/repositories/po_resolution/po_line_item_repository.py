@@ -75,3 +75,50 @@ class POLineItemRepository(BaseRepository):
             )
             for row in result.all()
         ]
+
+    async def get_by_ids(
+        self,
+        po_line_item_ids: list[UUID],
+    ) -> list[POLineItemRecord]:
+        if not po_line_item_ids:
+            return []
+
+        stmt = (
+            select(
+                POLineItem.id,
+                POLineItem.po_id,
+                POLineItem.item_code,
+                POLineItem.item_description,
+                POLineItem.quantity_ordered,
+                POLineItem.consumed_quantity,
+                POLineItem.unit_price,
+                POLineItem.discount_amount,
+                POLineItem.tax_details,
+                POLineItem.line_total,
+            )
+            .where(
+                POLineItem.id.in_(
+                    po_line_item_ids,
+                ),
+            )
+        )
+
+        result = await self.execute(
+            stmt,
+        )
+
+        return [
+            POLineItemRecord(
+                id=row.id,
+                po_id=row.po_id,
+                item_code=row.item_code,
+                item_description=row.item_description,
+                quantity_ordered=row.quantity_ordered,
+                consumed_quantity=row.consumed_quantity,
+                unit_price=row.unit_price,
+                discount_amount=row.discount_amount,
+                tax_details=row.tax_details,
+                line_total=row.line_total,
+            )
+            for row in result.all()
+        ]

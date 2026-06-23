@@ -9,17 +9,18 @@ from src.control.validation_flow import build_validation_state
 from src.core.exceptions.llm_exc import LLMServiceError
 from src.core.exceptions.validation_exc import InvoiceNotFoundError
 from src.data.models.postgres.enums import (
+    IssueType,
     ValidationIssueStatus,
 )
-from src.data.repositories.company_repository import (
+from src.data.repositories.company_resolution.company_repository import (
     CompanyRecord,
     CompanyRepository,
 )
-from src.data.repositories.invoice_repository import (
+from src.data.repositories.invoice_header_resolution.invoice_repository import (
     BuyerCompanyExtractedRecord,
     InvoiceRepository,
 )
-from src.data.repositories.validation_issue_repository import (
+from src.data.repositories.shared.validation_issue_repository import (
     ValidationIssueCreate,
     ValidationIssueRepository,
 )
@@ -41,6 +42,10 @@ logger = logging.getLogger(__name__)
 
 CHECK_STAGE = "buyer_company_validation"
 
+COMPANY_DETAILS_MISSING = "COMPANY_DETAILS_MISSING"
+MISSING_COMPANY_NAME = "MISSING_COMPANY_NAME"
+MISSING_COMPANY_GSTIN = "MISSING_COMPANY_GSTIN"
+MISSING_COMPANY_ADDRESS = "MISSING_COMPANY_ADDRESS"
 COMPANY_NAME_MISMATCH = "COMPANY_NAME_MISMATCH"
 COMPANY_GSTIN_MISMATCH = "COMPANY_GSTIN_MISMATCH"
 COMPANY_PAN_MISMATCH = "COMPANY_PAN_MISMATCH"
@@ -58,6 +63,7 @@ class PendingIssue:
     issue_code: str
     check_name: str
     field_name: str
+    issue_type: IssueType
     expected_value: str | None
     actual_value: str | None
     description: str
@@ -123,52 +129,20 @@ class BuyerCompanyValidationAgent:
         pending_issues: list[PendingIssue] = []
 
         pending_issues.extend(
-            self._validate_company_name(
-                extracted=extracted,
-                company=company,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_gstin(
-                extracted=extracted,
-                company=company,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_pan(
-                extracted=extracted,
-                company=company,
-            ),
-        )
-        pending_issues.extend(
-            await self._validate_billing_address(
-                extracted=extracted,
-                company=company,
-            ),
-        )
-        pending_issues.extend(
-            await self._validate_shipping_address(
-                extracted=extracted,
-                company=company,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_email(
-                extracted=extracted,
-                company=company,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_phone(
-                extracted=extracted,
-                company=company,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_bank_details(
+            self._validate_mandatory_fields_missing(
                 extracted=extracted,
             ),
         )
+
+        if not self._all_mandatory_fields_missing(
+            extracted=extracted,
+        ):
+            pending_issues.extend(
+                await self._validate_present_field_mismatches(
+                    extracted=extracted,
+                    company=company,
+                ),
+            )
 
         issue_codes = await self._persist_issues(
             invoice_id=invoice_id,
@@ -190,6 +164,201 @@ class BuyerCompanyValidationAgent:
             po_id=state.get("po_id"),
             issue_codes=issue_codes,
         )
+
+    @staticmethod
+    def _has_company_address(
+        extracted: BuyerCompanyExtractedRecord,
+    ) -> bool:
+        return has_text(
+            extracted.billing_address,
+        )
+
+    @staticmethod
+    def _all_mandatory_fields_missing(
+        extracted: BuyerCompanyExtractedRecord,
+    ) -> bool:
+        return (
+            not has_text(
+                extracted.company_name,
+            )
+            and not has_text(
+                extracted.gstin,
+            )
+            and not BuyerCompanyValidationAgent._has_company_address(
+                extracted,
+            )
+        )
+
+    def _validate_mandatory_fields_missing(
+        self,
+        extracted: BuyerCompanyExtractedRecord,
+    ) -> list[PendingIssue]:
+        company_name_missing = not has_text(
+            extracted.company_name,
+        )
+        company_gstin_missing = not has_text(
+            extracted.gstin,
+        )
+        company_address_missing = not self._has_company_address(
+            extracted,
+        )
+
+        if (
+            company_name_missing
+            and company_gstin_missing
+            and company_address_missing
+        ):
+            return [
+                PendingIssue(
+                    issue_code=COMPANY_DETAILS_MISSING,
+                    check_name="company_details_missing",
+                    field_name="company_details",
+                    issue_type=IssueType.MISSING,
+                    expected_value=None,
+                    actual_value=None,
+                    description=(
+                        "Buyer company name, GSTIN, and address could not "
+                        "be extracted from the invoice."
+                    ),
+                ),
+            ]
+
+        pending_issues: list[PendingIssue] = []
+
+        if company_name_missing:
+            pending_issues.append(
+                PendingIssue(
+                    issue_code=MISSING_COMPANY_NAME,
+                    check_name="company_name_missing",
+                    field_name="company_name",
+                    issue_type=IssueType.MISSING,
+                    expected_value=None,
+                    actual_value=None,
+                    description=(
+                        "Buyer company name could not be extracted "
+                        "from the invoice."
+                    ),
+                ),
+            )
+
+        if company_gstin_missing:
+            pending_issues.append(
+                PendingIssue(
+                    issue_code=MISSING_COMPANY_GSTIN,
+                    check_name="company_gstin_missing",
+                    field_name="company_gstin",
+                    issue_type=IssueType.MISSING,
+                    expected_value=None,
+                    actual_value=None,
+                    description=(
+                        "Buyer company GSTIN could not be extracted "
+                        "from the invoice."
+                    ),
+                ),
+            )
+
+        if company_address_missing:
+            pending_issues.append(
+                PendingIssue(
+                    issue_code=MISSING_COMPANY_ADDRESS,
+                    check_name="company_address_missing",
+                    field_name="company_address",
+                    issue_type=IssueType.MISSING,
+                    expected_value=None,
+                    actual_value=None,
+                    description=(
+                        "Buyer company address could not be extracted "
+                        "from the invoice."
+                    ),
+                ),
+            )
+
+        return pending_issues
+
+    async def _validate_present_field_mismatches(
+        self,
+        extracted: BuyerCompanyExtractedRecord,
+        company: CompanyRecord,
+    ) -> list[PendingIssue]:
+        pending_issues: list[PendingIssue] = []
+
+        if has_text(
+            extracted.company_name,
+        ):
+            pending_issues.extend(
+                self._validate_company_name(
+                    extracted=extracted,
+                    company=company,
+                ),
+            )
+
+        if has_text(
+            extracted.gstin,
+        ):
+            pending_issues.extend(
+                self._validate_gstin(
+                    extracted=extracted,
+                    company=company,
+                ),
+            )
+
+        if self._has_company_address(
+            extracted,
+        ):
+            pending_issues.extend(
+                await self._validate_company_address(
+                    extracted=extracted,
+                    company=company,
+                ),
+            )
+
+        if has_text(
+            extracted.pan_number,
+        ):
+            pending_issues.extend(
+                self._validate_pan(
+                    extracted=extracted,
+                    company=company,
+                ),
+            )
+
+        if has_text(
+            extracted.shipping_address,
+        ):
+            pending_issues.extend(
+                await self._validate_shipping_address(
+                    extracted=extracted,
+                    company=company,
+                ),
+            )
+
+        if has_text(
+            extracted.email,
+        ):
+            pending_issues.extend(
+                self._validate_email(
+                    extracted=extracted,
+                    company=company,
+                ),
+            )
+
+        if has_text(
+            extracted.phone,
+        ):
+            pending_issues.extend(
+                self._validate_phone(
+                    extracted=extracted,
+                    company=company,
+                ),
+            )
+
+        pending_issues.extend(
+            self._validate_bank_details(
+                extracted=extracted,
+            ),
+        )
+
+        return pending_issues
 
     def _validate_company_name(
         self,
@@ -236,11 +405,12 @@ class BuyerCompanyValidationAgent:
                 issue_code=COMPANY_NAME_MISMATCH,
                 check_name="company_name",
                 field_name="company_name",
+                issue_type=IssueType.MISMATCH,
                 expected_value=company.company_name,
                 actual_value=extracted_name,
                 description=(
                     "Extracted buyer company name does not match "
-                    f"company master. {match_result.reason}"
+                    "the active company master record."
                 ),
             ),
         ]
@@ -268,13 +438,14 @@ class BuyerCompanyValidationAgent:
         return [
             PendingIssue(
                 issue_code=COMPANY_GSTIN_MISMATCH,
-                check_name="gstin",
-                field_name="gstin",
+                check_name="company_gstin",
+                field_name="company_gstin",
+                issue_type=IssueType.MISMATCH,
                 expected_value=company.gstin,
                 actual_value=extracted_gstin,
                 description=(
-                    "Extracted buyer GSTIN does not match "
-                    "company master GSTIN."
+                    "Extracted buyer company GSTIN does not match "
+                    "the active company master record."
                 ),
             ),
         ]
@@ -311,16 +482,17 @@ class BuyerCompanyValidationAgent:
                 issue_code=COMPANY_PAN_MISMATCH,
                 check_name="pan_number",
                 field_name="pan_number",
+                issue_type=IssueType.MISMATCH,
                 expected_value=master_pan,
                 actual_value=extracted_pan,
                 description=(
-                    "Extracted buyer PAN does not match "
-                    "company master PAN."
+                    "Extracted buyer company PAN does not match "
+                    "the active company master record."
                 ),
             ),
         ]
 
-    async def _validate_billing_address(
+    async def _validate_company_address(
         self,
         extracted: BuyerCompanyExtractedRecord,
         company: CompanyRecord,
@@ -329,11 +501,11 @@ class BuyerCompanyValidationAgent:
             extracted_value=extracted.billing_address,
             master_value=company.billing_address,
             issue_code=COMPANY_ADDRESS_MISMATCH,
-            check_name="billing_address",
-            field_name="billing_address",
+            check_name="company_address",
+            field_name="company_address",
             mismatch_description=(
-                "Extracted buyer billing address does not match "
-                "company master billing address."
+                "Extracted buyer company address does not match "
+                "the active company master record."
             ),
         )
 
@@ -349,8 +521,8 @@ class BuyerCompanyValidationAgent:
             check_name="shipping_address",
             field_name="shipping_address",
             mismatch_description=(
-                "Extracted buyer shipping address does not match "
-                "company master shipping address."
+                "Extracted buyer company shipping address does not match "
+                "the active company master record."
             ),
         )
 
@@ -417,11 +589,10 @@ class BuyerCompanyValidationAgent:
                 issue_code=issue_code,
                 check_name=check_name,
                 field_name=field_name,
+                issue_type=IssueType.MISMATCH,
                 expected_value=master_address,
                 actual_value=extracted_address,
-                description=(
-                    f"{mismatch_description} {match_result.reason}"
-                ),
+                description=mismatch_description,
             ),
         ]
 
@@ -457,11 +628,12 @@ class BuyerCompanyValidationAgent:
                 issue_code=COMPANY_EMAIL_MISMATCH,
                 check_name="email",
                 field_name="email",
+                issue_type=IssueType.MISMATCH,
                 expected_value=master_email,
                 actual_value=extracted_email,
                 description=(
-                    "Extracted buyer email does not match "
-                    "company master email."
+                    "Extracted buyer company email does not match "
+                    "the active company master record."
                 ),
             ),
         ]
@@ -498,11 +670,12 @@ class BuyerCompanyValidationAgent:
                 issue_code=COMPANY_PHONE_MISMATCH,
                 check_name="phone",
                 field_name="phone",
+                issue_type=IssueType.MISMATCH,
                 expected_value=master_phone,
                 actual_value=extracted_phone,
                 description=(
-                    "Extracted buyer phone does not match "
-                    "company master phone."
+                    "Extracted buyer company phone number does not match "
+                    "the active company master record."
                 ),
             ),
         ]

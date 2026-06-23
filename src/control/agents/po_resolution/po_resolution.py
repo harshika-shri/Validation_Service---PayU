@@ -7,50 +7,49 @@ from typing import Any
 from uuid import UUID
 
 from src.config.settings import settings
-from src.control.agents.line_allocation_search import (
+from src.control.agents.po_resolution.line_allocation_search import (
     find_all_allocation_plans,
 )
-from src.control.agents.po_coverage_search import (
+from src.control.agents.po_resolution.po_coverage_search import (
     filter_pos_by_invoice_date,
 )
-from src.control.agents.po_line_matcher import (
+from src.control.agents.po_resolution.po_line_matcher import (
     POLineMatcher,
 )
 from src.control.validation_flow import build_validation_state
 from src.core.exceptions.validation_exc import InvoiceNotFoundError
 from src.data.models.postgres.enums import (
     IssueType,
+    POResolutionCandidateType,
     PurchaseOrderStatus,
     ValidationIssueStatus,
 )
-from src.data.repositories.invoice_extracted_vendor_repository import (
+from src.data.repositories.vendor_resolution.invoice_extracted_vendor_repository import (
     InvoiceExtractedVendorRepository,
 )
-from src.data.repositories.invoice_line_item_repository import (
+from src.data.repositories.line_item_validation.invoice_line_item_repository import (
     InvoiceLineItemRecord,
     InvoiceLineItemRepository,
 )
-from src.data.repositories.invoice_line_po_allocation_repository import (
-    InvoiceLinePOAllocationRepository,
+from src.data.repositories.po_resolution.invoice_po_resolution_group_repository import (
+    InvoicePOResolutionGroupRepository,
+    ResolutionGroupCreate,
 )
-from src.data.repositories.invoice_po_mapping_repository import (
-    InvoicePOMappingRepository,
-)
-from src.data.repositories.invoice_po_resolution_repository import (
+from src.data.repositories.po_resolution.invoice_po_resolution_repository import (
     InvoicePOResolutionRepository,
     POResolutionInvoiceRecord,
 )
-from src.data.repositories.po_line_item_repository import (
+from src.data.repositories.po_resolution.po_line_item_repository import (
     POLineItemRepository,
 )
-from src.data.repositories.po_line_quantity_repository import (
+from src.data.repositories.po_resolution.po_line_quantity_repository import (
     POLineQuantityRepository,
 )
-from src.data.repositories.purchase_order_repository import (
+from src.data.repositories.po_resolution.purchase_order_repository import (
     PurchaseOrderRecord,
     PurchaseOrderRepository,
 )
-from src.data.repositories.validation_issue_repository import (
+from src.data.repositories.shared.validation_issue_repository import (
     ValidationIssueCreate,
     ValidationIssueRepository,
 )
@@ -66,7 +65,9 @@ logger = logging.getLogger(__name__)
 CHECK_STAGE = "po_resolution"
 
 VENDOR_NOT_FOUND = "VENDOR_NOT_FOUND"
-PO_NOT_FOUND = "PO_NOT_FOUND"
+PO_MISSING = "PO_MISSING"
+PO_RECOVERED = "PO_RECOVERED"
+PO_RESOLUTION_BLOCKED = "PO_RESOLUTION_BLOCKED"
 PO_CLOSED = "PO_CLOSED"
 PO_UNRESOLVED = "PO_UNRESOLVED"
 PO_AMBIGUOUS = "PO_AMBIGUOUS"
@@ -75,7 +76,7 @@ PO_VENDOR_CONFLICT = "PO_VENDOR_CONFLICT"
 
 _RECOVERABLE_PO_ISSUE_CODES = frozenset(
     {
-        PO_NOT_FOUND,
+        PO_MISSING,
         INVALID_PO_REFERENCE,
     },
 )
@@ -132,8 +133,7 @@ class POResolutionAgent:
         purchase_order_repo: PurchaseOrderRepository,
         po_line_item_repo: POLineItemRepository,
         po_line_quantity_repo: POLineQuantityRepository,
-        invoice_po_mapping_repo: InvoicePOMappingRepository,
-        allocation_repo: InvoiceLinePOAllocationRepository,
+        resolution_group_repo: InvoicePOResolutionGroupRepository,
         validation_issue_repo: ValidationIssueRepository,
     ) -> None:
         self._invoice_po_repo = invoice_po_repo
@@ -142,8 +142,7 @@ class POResolutionAgent:
         self._purchase_order_repo = purchase_order_repo
         self._po_line_item_repo = po_line_item_repo
         self._po_line_quantity_repo = po_line_quantity_repo
-        self._invoice_po_mapping_repo = invoice_po_mapping_repo
-        self._allocation_repo = allocation_repo
+        self._resolution_group_repo = resolution_group_repo
         self._validation_issue_repo = validation_issue_repo
 
     async def run(
@@ -187,30 +186,7 @@ class POResolutionAgent:
             if extracted_vendor is not None
             else None
         )
-
-        if vendor_master_id is None:
-            issue_codes = await self._persist_issues(
-                invoice_id=invoice_id,
-                pending_issues=[
-                    PendingIssue(
-                        issue_code=VENDOR_NOT_FOUND,
-                        check_name="vendor_precondition",
-                        field_name="vendor_master_id",
-                        issue_type=IssueType.MISSING,
-                        expected_value=None,
-                        actual_value=None,
-                        description=(
-                            "Vendor is unresolved; PO resolution "
-                            "cannot proceed."
-                        ),
-                    ),
-                ],
-                issue_codes=issue_codes,
-            )
-            return await self._return_po_resolution_failure(
-                invoice_id=invoice_id,
-                issue_codes=issue_codes,
-            )
+        vendor_unresolved = vendor_master_id is None
 
         pending_issues: list[PendingIssue] = []
 
@@ -230,6 +206,84 @@ class POResolutionAgent:
         po_reference_missing = (
             not invoice.po_numbers_extracted
         )
+
+        if vendor_unresolved:
+            direct_solution = (
+                await self._try_direct_extracted_po_resolution(
+                    invoice_id=invoice_id,
+                    invoice_lines=invoice_lines,
+                    matched_pos=extracted_result.matched_pos,
+                )
+            )
+
+            if direct_solution is None:
+                unresolved_issues = list(
+                    pending_issues,
+                )
+                unresolved_issues.append(
+                    PendingIssue(
+                        issue_code=PO_RESOLUTION_BLOCKED,
+                        check_name="vendor_precondition",
+                        field_name="vendor_master_id",
+                        issue_type=IssueType.MISSING,
+                        expected_value=None,
+                        actual_value=None,
+                        description=(
+                            "PO resolution could not proceed because "
+                            "vendor resolution failed."
+                        ),
+                    ),
+                )
+                unresolved_issues.append(
+                    PendingIssue(
+                        issue_code=PO_UNRESOLVED,
+                        check_name="vendor_precondition",
+                        field_name="po_id",
+                        issue_type=IssueType.MISSING,
+                        expected_value=None,
+                        actual_value=None,
+                        description=(
+                            "No suitable PO candidate could be identified."
+                        ),
+                    ),
+                )
+                issue_codes = await self._persist_issues(
+                    invoice_id=invoice_id,
+                    pending_issues=unresolved_issues,
+                    issue_codes=issue_codes,
+                )
+                return await self._return_po_resolution_failure(
+                    invoice_id=invoice_id,
+                    issue_codes=issue_codes,
+                )
+
+            pending_issues.append(
+                PendingIssue(
+                    issue_code=VENDOR_NOT_FOUND,
+                    check_name="vendor_precondition",
+                    field_name="vendor_master_id",
+                    issue_type=IssueType.MISSING,
+                    expected_value=None,
+                    actual_value=None,
+                    description=(
+                        "Unable to resolve a vendor from the extracted "
+                        "invoice details."
+                    ),
+                ),
+            )
+
+            return await self._finalize_po_resolution(
+                invoice_id=invoice_id,
+                state=state,
+                resolved_set=direct_solution,
+                matched_pos=extracted_result.matched_pos,
+                candidate_pool=extracted_result.matched_pos,
+                vendor_master_id=None,
+                pending_issues=pending_issues,
+                issue_codes=issue_codes,
+                po_reference_missing=po_reference_missing,
+                candidate_type=POResolutionCandidateType.RESOLVED,
+            )
 
         direct_solution = (
             await self._try_direct_extracted_po_resolution(
@@ -260,6 +314,7 @@ class POResolutionAgent:
                 pending_issues=pending_issues,
                 issue_codes=issue_codes,
                 po_reference_missing=po_reference_missing,
+                candidate_type=POResolutionCandidateType.RESOLVED,
             )
 
         logger.info(
@@ -310,8 +365,7 @@ class POResolutionAgent:
                     expected_value=None,
                     actual_value=None,
                     description=(
-                        "No eligible purchase orders found for "
-                        "PO resolution."
+                        "No suitable PO candidate could be identified."
                     ),
                 ),
             )
@@ -352,8 +406,7 @@ class POResolutionAgent:
                     expected_value=None,
                     actual_value=None,
                     description=(
-                        "No valid PO set could fully explain "
-                        "invoice demand."
+                        "No suitable PO candidate could be identified."
                     ),
                 ),
             )
@@ -390,8 +443,9 @@ class POResolutionAgent:
                     expected_value=None,
                     actual_value=None,
                     description=(
-                        "Multiple valid PO sets were found for "
-                        "this invoice."
+                        "Multiple PO candidates satisfy the invoice and "
+                        "the system cannot confidently determine the "
+                        "correct one."
                     ),
                 ),
             )
@@ -403,18 +457,37 @@ class POResolutionAgent:
                     po_set_solutions=solutions,
                 )
             )
+            await self._create_resolution_groups(
+                invoice_id=invoice_id,
+                solutions=solutions,
+                candidate_type=POResolutionCandidateType.AMBIGUOUS,
+            )
             issue_codes = await self._persist_issues(
                 invoice_id=invoice_id,
                 pending_issues=pending_issues,
                 issue_codes=issue_codes,
             )
-            return await self._return_po_resolution_failure(
+            return build_validation_state(
                 invoice_id=invoice_id,
+                po_id=state.get("po_id"),
                 issue_codes=issue_codes,
             )
 
         resolved_set = next(
             iter(solutions),
+        )
+
+        recovery_candidate_type = (
+            POResolutionCandidateType.RECOVERED
+            if (
+                po_reference_missing
+                or any(
+                    issue.issue_code
+                    in _RECOVERABLE_PO_ISSUE_CODES
+                    for issue in pending_issues
+                )
+            )
+            else POResolutionCandidateType.RESOLVED
         )
 
         return await self._finalize_po_resolution(
@@ -427,6 +500,7 @@ class POResolutionAgent:
             pending_issues=pending_issues,
             issue_codes=issue_codes,
             po_reference_missing=po_reference_missing,
+            candidate_type=recovery_candidate_type,
         )
 
     async def _return_po_resolution_failure(
@@ -449,18 +523,37 @@ class POResolutionAgent:
         self,
         invoice_id: UUID,
     ) -> None:
-        await self._invoice_po_mapping_repo.delete_mappings_for_invoice(
-            invoice_id,
-        )
-        await self._allocation_repo.cancel_pending_for_invoice(
+        await self._resolution_group_repo.delete_groups_for_invoice(
             invoice_id,
         )
 
         logger.info(
-            "Cleared unresolved PO mappings and pending allocations",
+            "Cleared PO resolution candidate groups",
             extra={
                 "invoice_id": str(invoice_id),
             },
+        )
+
+    async def _create_resolution_groups(
+        self,
+        *,
+        invoice_id: UUID,
+        solutions: set[frozenset[UUID]],
+        candidate_type: POResolutionCandidateType,
+    ) -> None:
+        groups = [
+            ResolutionGroupCreate(
+                candidate_type=candidate_type,
+                po_ids=sorted(
+                    solution,
+                    key=str,
+                ),
+            )
+            for solution in solutions
+        ]
+        await self._resolution_group_repo.replace_groups_for_invoice(
+            invoice_id=invoice_id,
+            groups=groups,
         )
 
     @staticmethod
@@ -609,10 +702,11 @@ class POResolutionAgent:
         resolved_set: frozenset[UUID],
         matched_pos: list[PurchaseOrderRecord],
         candidate_pool: list[PurchaseOrderRecord],
-        vendor_master_id: UUID,
+        vendor_master_id: UUID | None,
         pending_issues: list[PendingIssue],
         issue_codes: list[str],
         po_reference_missing: bool = False,
+        candidate_type: POResolutionCandidateType,
     ) -> dict[str, Any]:
         pending_issues.extend(
             self._detect_invalid_po_references(
@@ -630,22 +724,6 @@ class POResolutionAgent:
         if vendor_conflict is not None:
             pending_issues.append(
                 vendor_conflict,
-            )
-            pending_issues = (
-                await self._attach_candidate_po_context(
-                    pending_issues=pending_issues,
-                    candidate_pool=candidate_pool,
-                    invoice_id=invoice_id,
-                )
-            )
-            issue_codes = await self._persist_issues(
-                invoice_id=invoice_id,
-                pending_issues=pending_issues,
-                issue_codes=issue_codes,
-            )
-            return await self._return_po_resolution_failure(
-                invoice_id=invoice_id,
-                issue_codes=issue_codes,
             )
 
         recoverable_pending = [
@@ -688,12 +766,32 @@ class POResolutionAgent:
                     issue_code,
                 )
 
-        await self._invoice_po_mapping_repo.create_mappings(
+        if (
+            candidate_type
+            == POResolutionCandidateType.RECOVERED
+        ):
+            remaining_pending.append(
+                PendingIssue(
+                    issue_code=PO_RECOVERED,
+                    check_name="po_recovery",
+                    field_name="po_id",
+                    issue_type=IssueType.MISSING,
+                    expected_value=None,
+                    actual_value=None,
+                    description=(
+                        "A replacement PO candidate was identified using "
+                        "vendor, date, and invoice content after the "
+                        "extracted PO reference could not be used."
+                    ),
+                ),
+            )
+
+        await self._create_resolution_groups(
             invoice_id=invoice_id,
-            po_ids=sorted(
+            solutions={
                 resolved_set,
-                key=str,
-            ),
+            },
+            candidate_type=candidate_type,
         )
 
         if remaining_pending:
@@ -736,6 +834,7 @@ class POResolutionAgent:
                     str(po_id)
                     for po_id in resolved_set
                 ],
+                "candidate_type": candidate_type.value,
                 "issue_codes": issue_codes,
             },
         )
@@ -756,15 +855,14 @@ class POResolutionAgent:
         if not invoice.po_numbers_extracted:
             pending_issues.append(
                 PendingIssue(
-                    issue_code=PO_NOT_FOUND,
+                    issue_code=PO_MISSING,
                     check_name="extracted_po_validation",
                     field_name="po_number",
                     issue_type=IssueType.MISSING,
                     expected_value=None,
                     actual_value=None,
                     description=(
-                        "Purchase order number is missing on "
-                        "the invoice."
+                        "No PO number could be extracted from the invoice."
                     ),
                 ),
             )
@@ -785,15 +883,15 @@ class POResolutionAgent:
             if purchase_order is None:
                 pending_issues.append(
                     PendingIssue(
-                        issue_code=PO_NOT_FOUND,
+                        issue_code=INVALID_PO_REFERENCE,
                         check_name="extracted_po_validation",
                         field_name="po_number",
-                        issue_type=IssueType.MISSING,
+                        issue_type=IssueType.MISMATCH,
                         expected_value=None,
                         actual_value=po_number,
                         description=(
-                            f"Extracted PO number {po_number} "
-                            "was not found in purchase orders."
+                            "Extracted PO number does not exist in "
+                            "the system."
                         ),
                     ),
                 )
@@ -1020,9 +1118,7 @@ class POResolutionAgent:
                 expected_value=None,
                 actual_value=referenced_numbers,
                 description=(
-                    "Invoice referenced purchase order(s) that "
-                    "do not match the resolved PO set based on "
-                    "line-item coverage."
+                    "Extracted PO number does not exist in the system."
                 ),
             ),
         ]
@@ -1031,7 +1127,7 @@ class POResolutionAgent:
     def _validate_vendor_consistency(
         candidate_pool: list[PurchaseOrderRecord],
         resolved_set: frozenset[UUID],
-        vendor_master_id: UUID,
+        vendor_master_id: UUID | None,
     ) -> PendingIssue | None:
         po_by_id = {
             purchase_order.id: purchase_order
@@ -1045,6 +1141,24 @@ class POResolutionAgent:
 
             if purchase_order is None:
                 continue
+
+            if vendor_master_id is None:
+                return PendingIssue(
+                    issue_code=PO_VENDOR_CONFLICT,
+                    check_name="vendor_consistency",
+                    field_name="vendor_id",
+                    issue_type=IssueType.MISMATCH,
+                    expected_value=None,
+                    actual_value=(
+                        str(purchase_order.vendor_id)
+                        if purchase_order.vendor_id is not None
+                        else None
+                    ),
+                    description=(
+                        "Resolved PO belongs to a vendor that conflicts "
+                        "with the vendor extracted from the invoice."
+                    ),
+                )
 
             if purchase_order.vendor_id != vendor_master_id:
                 return PendingIssue(
@@ -1061,8 +1175,8 @@ class POResolutionAgent:
                         else None
                     ),
                     description=(
-                        f"Resolved PO {purchase_order.po_number} "
-                        "belongs to a different vendor."
+                        "Resolved PO belongs to a vendor that conflicts "
+                        "with the vendor extracted from the invoice."
                     ),
                 )
 

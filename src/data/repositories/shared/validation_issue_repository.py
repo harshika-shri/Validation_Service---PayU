@@ -15,11 +15,17 @@ from src.data.models.postgres.invoice_validation_issues import (
 )
 from src.data.repositories.base_repo import BaseRepository
 
+_ACTIVE_ISSUE_STATUSES = (
+    ValidationIssueStatus.OPEN,
+    ValidationIssueStatus.PENDING_REVIEW,
+)
+
 RECOVERABLE_ISSUE_CODES = frozenset(
     {
         "MISSING_INVOICE_NUMBER",
         "VENDOR_NOT_FOUND",
-        "PO_NOT_FOUND",
+        "PO_MISSING",
+        "PO_RECOVERED",
         "INVALID_PO_REFERENCE",
     },
 )
@@ -113,8 +119,9 @@ class ValidationIssueRepository(BaseRepository):
             )
             .where(
                 InvoiceValidationIssue.invoice_id == invoice_id,
-                InvoiceValidationIssue.status
-                == ValidationIssueStatus.OPEN,
+                InvoiceValidationIssue.status.in_(
+                    _ACTIVE_ISSUE_STATUSES,
+                ),
                 InvoiceValidationIssue.issue_metadata[
                     "issue_code"
                 ].as_string()
@@ -142,8 +149,9 @@ class ValidationIssueRepository(BaseRepository):
             )
             .where(
                 InvoiceValidationIssue.invoice_id == invoice_id,
-                InvoiceValidationIssue.status
-                == ValidationIssueStatus.OPEN,
+                InvoiceValidationIssue.status.in_(
+                    _ACTIVE_ISSUE_STATUSES,
+                ),
                 InvoiceValidationIssue.issue_metadata[
                     "issue_code"
                 ].as_string()
@@ -151,6 +159,44 @@ class ValidationIssueRepository(BaseRepository):
             )
             .values(
                 status=ValidationIssueStatus.RESOLVED,
+            )
+        )
+
+        result = await self.execute(
+            stmt,
+        )
+
+        return result.rowcount or 0
+
+    async def mark_issue_waived(
+        self,
+        invoice_id: UUID,
+        issue_code: str,
+        description: str | None = None,
+    ) -> int:
+        values: dict[str, Any] = {
+            "status": ValidationIssueStatus.WAIVED,
+        }
+
+        if description is not None:
+            values["description"] = description
+
+        stmt = (
+            update(
+                InvoiceValidationIssue,
+            )
+            .where(
+                InvoiceValidationIssue.invoice_id == invoice_id,
+                InvoiceValidationIssue.status.in_(
+                    _ACTIVE_ISSUE_STATUSES,
+                ),
+                InvoiceValidationIssue.issue_metadata[
+                    "issue_code"
+                ].as_string()
+                == issue_code,
+            )
+            .values(
+                **values,
             )
         )
 
@@ -174,7 +220,7 @@ class ValidationIssueRepository(BaseRepository):
                 issue_type=issue.issue_type,
             )
             for issue in invoice_issues
-            if issue.status == ValidationIssueStatus.OPEN
+            if issue.status in _ACTIVE_ISSUE_STATUSES
         ]
 
     async def get_invoice_issues(

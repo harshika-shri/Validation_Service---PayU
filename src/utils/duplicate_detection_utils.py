@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
-from uuid import UUID
 
 
 @dataclass(frozen=True, slots=True)
 class InvoiceBusinessContent:
-    po_ids: frozenset[UUID]
-    allocations: frozenset[tuple[UUID, UUID, Decimal]]
+    invoice_date: date | None
     line_items: frozenset[tuple[str, str, Decimal, Decimal]]
     total_amount: Decimal | None
 

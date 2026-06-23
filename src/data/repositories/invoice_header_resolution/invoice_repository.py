@@ -6,7 +6,7 @@ from uuid import UUID
 
 from sqlalchemy import select, update
 
-from src.data.models.postgres.enums import InvoiceStatus
+from src.data.models.postgres.enums import InvoiceStatus, InvoiceValidationOutcome
 from src.data.models.postgres.invoices import Invoice
 from src.data.models.postgres.vendor_master import VendorMaster
 from src.data.repositories.base_repo import BaseRepository
@@ -25,6 +25,7 @@ class ReviewSummaryInvoiceRecord:
     invoice_number: str | None
     vendor_id: UUID | None
     invoice_status: InvoiceStatus | None
+    validation_outcome: InvoiceValidationOutcome | None
     vendor_name: str | None
 
 
@@ -77,6 +78,7 @@ class InvoiceRepository(BaseRepository):
                 Invoice.invoice_number,
                 Invoice.vendor_id,
                 Invoice.invoice_status,
+                Invoice.validation_outcome,
                 VendorMaster.vendor_name,
             )
             .outerjoin(
@@ -101,6 +103,7 @@ class InvoiceRepository(BaseRepository):
             invoice_number=row.invoice_number,
             vendor_id=row.vendor_id,
             invoice_status=row.invoice_status,
+            validation_outcome=row.validation_outcome,
             vendor_name=row.vendor_name,
         )
 
@@ -166,6 +169,41 @@ class InvoiceRepository(BaseRepository):
             )
             .values(
                 invoice_status=invoice_status,
+            )
+        )
+
+        await self.execute(
+            stmt,
+        )
+
+    async def get_validation_outcome(
+        self,
+        invoice_id: UUID,
+    ) -> InvoiceValidationOutcome | None:
+        stmt = select(
+            Invoice.validation_outcome,
+        ).where(
+            Invoice.id == invoice_id,
+        )
+
+        result = await self.execute(
+            stmt,
+        )
+
+        return result.scalar_one_or_none()
+
+    async def update_validation_outcome(
+        self,
+        invoice_id: UUID,
+        validation_outcome: InvoiceValidationOutcome,
+    ) -> None:
+        stmt = (
+            update(Invoice)
+            .where(
+                Invoice.id == invoice_id,
+            )
+            .values(
+                validation_outcome=validation_outcome,
             )
         )
 

@@ -7,51 +7,52 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from src.control.agents.line_allocation_search import (
+from src.control.agents.po_resolution.line_allocation_search import (
     AllocationRecord,
     find_all_allocation_plans,
 )
-from src.control.agents.po_line_matcher import (
+from src.control.agents.po_resolution.po_line_matcher import (
     POLineMatcher,
 )
 from src.control.validation_flow import (
     LINE_ITEM_VENDOR_CONFLICT,
-    PO_AMBIGUOUS,
-    PO_NOT_FOUND,
+    PO_MISSING,
     PO_UNRESOLVED,
     build_validation_state,
     should_continue_validation,
 )
 from src.data.models.postgres.enums import (
     IssueType,
+    POResolutionCandidateType,
     ValidationIssueStatus,
 )
-from src.data.repositories.invoice_extracted_vendor_repository import (
-    InvoiceExtractedVendorRepository,
+from src.data.repositories.po_resolution.invoice_line_allocation_candidate_repository import (
+    AllocationCandidateGroupCreate,
+    AllocationCandidateItemCreate,
+    InvoiceLineAllocationCandidateRepository,
 )
-from src.data.repositories.invoice_line_item_repository import (
+from src.data.repositories.po_resolution.invoice_po_resolution_group_repository import (
+    InvoicePOResolutionGroupRepository,
+)
+from src.data.repositories.line_item_validation.invoice_line_item_repository import (
     InvoiceLineItemRecord,
     InvoiceLineItemRepository,
 )
-from src.data.repositories.invoice_line_po_allocation_repository import (
-    AllocationCreate,
-    InvoiceLinePOAllocationRepository,
+from src.data.repositories.vendor_resolution.invoice_extracted_vendor_repository import (
+    InvoiceExtractedVendorRepository,
 )
-from src.data.repositories.invoice_po_mapping_repository import (
-    InvoicePOMappingRepository,
-)
-from src.data.repositories.po_line_item_repository import (
+from src.data.repositories.po_resolution.po_line_item_repository import (
     POLineItemRecord,
     POLineItemRepository,
 )
-from src.data.repositories.po_line_quantity_repository import (
+from src.data.repositories.po_resolution.po_line_quantity_repository import (
     POLineQuantityRepository,
 )
-from src.data.repositories.purchase_order_repository import (
+from src.data.repositories.po_resolution.purchase_order_repository import (
     PurchaseOrderRecord,
     PurchaseOrderRepository,
 )
-from src.data.repositories.validation_issue_repository import (
+from src.data.repositories.shared.validation_issue_repository import (
     ValidationIssueCreate,
     ValidationIssueRepository,
 )
@@ -78,9 +79,8 @@ INVALID_ALLOCATION = "INVALID_ALLOCATION"
 
 _BLOCKING_ALLOCATION_ISSUE_CODES = frozenset(
     {
-        PO_NOT_FOUND,
+        PO_MISSING,
         PO_UNRESOLVED,
-        PO_AMBIGUOUS,
         UNMATCHED_LINE_ITEM,
         AMBIGUOUS_LINE_MATCH,
         LINE_ITEM_VENDOR_CONFLICT,
@@ -104,19 +104,19 @@ class LineItemValidationAgent:
     def __init__(
         self,
         invoice_line_item_repo: InvoiceLineItemRepository,
-        invoice_po_mapping_repo: InvoicePOMappingRepository,
+        resolution_group_repo: InvoicePOResolutionGroupRepository,
+        allocation_candidate_repo: InvoiceLineAllocationCandidateRepository,
         po_line_item_repo: POLineItemRepository,
         po_line_quantity_repo: POLineQuantityRepository,
-        allocation_repo: InvoiceLinePOAllocationRepository,
         extracted_vendor_repo: InvoiceExtractedVendorRepository,
         purchase_order_repo: PurchaseOrderRepository,
         validation_issue_repo: ValidationIssueRepository,
     ) -> None:
         self._invoice_line_item_repo = invoice_line_item_repo
-        self._invoice_po_mapping_repo = invoice_po_mapping_repo
+        self._resolution_group_repo = resolution_group_repo
+        self._allocation_candidate_repo = allocation_candidate_repo
         self._po_line_item_repo = po_line_item_repo
         self._po_line_quantity_repo = po_line_quantity_repo
-        self._allocation_repo = allocation_repo
         self._extracted_vendor_repo = extracted_vendor_repo
         self._purchase_order_repo = purchase_order_repo
         self._validation_issue_repo = validation_issue_repo
@@ -162,15 +162,15 @@ class LineItemValidationAgent:
             )
 
         resolved_po_ids = (
-            await self._invoice_po_mapping_repo.get_po_ids_by_invoice_id(
+            await self._resolution_group_repo.get_candidate_po_ids_for_validation(
                 invoice_id,
             )
         )
 
         if not resolved_po_ids:
             logger.info(
-                "Skipping line item validation; no resolved PO "
-                "mappings found",
+                "Skipping line item validation; no candidate PO "
+                "resolution group found",
                 extra={
                     "invoice_id": str(invoice_id),
                 },
@@ -257,9 +257,6 @@ class LineItemValidationAgent:
                 pending_issues=pending_issues,
                 issue_codes=issue_codes,
             )
-            await self._clear_po_resolution_artifacts(
-                invoice_id,
-            )
             return build_validation_state(
                 invoice_id=invoice_id,
                 po_id=None,
@@ -329,9 +326,6 @@ class LineItemValidationAgent:
                 pending_issues=pending_issues,
                 issue_codes=issue_codes,
             )
-            await self._clear_po_resolution_artifacts(
-                invoice_id,
-            )
             return build_validation_state(
                 invoice_id=invoice_id,
                 po_id=None,
@@ -365,8 +359,13 @@ class LineItemValidationAgent:
                 pending_issues=pending_issues,
                 issue_codes=issue_codes,
             )
-            await self._clear_po_resolution_artifacts(
-                invoice_id,
+            await self._persist_allocation_candidates(
+                invoice_id=invoice_id,
+                plans=list(
+                    allocation_plans,
+                ),
+                invoice_lines=invoice_lines,
+                candidate_type=POResolutionCandidateType.AMBIGUOUS,
             )
             return build_validation_state(
                 invoice_id=invoice_id,
@@ -417,9 +416,6 @@ class LineItemValidationAgent:
                 pending_issues=pending_issues,
                 issue_codes=issue_codes,
             )
-            await self._clear_po_resolution_artifacts(
-                invoice_id,
-            )
             return build_validation_state(
                 invoice_id=invoice_id,
                 po_id=None,
@@ -451,42 +447,34 @@ class LineItemValidationAgent:
                 pending_issues=pending_issues,
                 issue_codes=issue_codes,
             )
-            await self._clear_po_resolution_artifacts(
-                invoice_id,
-            )
             return build_validation_state(
                 invoice_id=invoice_id,
                 po_id=None,
                 issue_codes=issue_codes,
             )
 
-        unit_price_by_line = {
-            line.id: line.unit_price
-            for line in invoice_lines
-        }
-
-        allocation_creates = [
-            AllocationCreate(
-                invoice_line_item_id=record.invoice_line_item_id,
-                po_id=record.po_id,
-                po_line_item_id=record.po_line_item_id,
-                allocated_quantity=record.allocated_quantity,
-                allocated_amount=(
-                    record.allocated_quantity
-                    * unit_price_by_line[
-                        record.invoice_line_item_id
-                    ]
-                ).quantize(
-                    Decimal("0.01"),
-                ),
-                match_type=record.match_type,
+        resolution_groups = (
+            await self._resolution_group_repo.get_groups_for_invoice(
+                invoice_id,
             )
-            for record in resolved_plan
-        ]
+        )
+        resolution_group_id = (
+            resolution_groups[0].id
+            if len(resolution_groups) == 1
+            else None
+        )
+        allocation_candidate_type = (
+            resolution_groups[0].candidate_type
+            if len(resolution_groups) == 1
+            else POResolutionCandidateType.RESOLVED
+        )
 
-        await self._allocation_repo.replace_pending_allocations_for_invoice(
+        await self._persist_allocation_candidates(
             invoice_id=invoice_id,
-            allocations=allocation_creates,
+            plans=[resolved_plan],
+            invoice_lines=invoice_lines,
+            candidate_type=allocation_candidate_type,
+            resolution_group_id=resolution_group_id,
         )
 
         issue_codes = await self._persist_issues(
@@ -499,7 +487,7 @@ class LineItemValidationAgent:
             "Completed line item validation",
             extra={
                 "invoice_id": str(invoice_id),
-                "allocation_count": len(resolved_plan),
+                "validated_allocation_count": len(resolved_plan),
                 "issue_codes": issue_codes,
             },
         )
@@ -766,22 +754,69 @@ class LineItemValidationAgent:
             context,
         )
 
-    async def _clear_po_resolution_artifacts(
+    async def _persist_allocation_candidates(
         self,
         invoice_id: UUID,
+        plans: list[tuple[AllocationRecord, ...]],
+        invoice_lines: list[InvoiceLineItemRecord],
+        candidate_type: POResolutionCandidateType,
+        resolution_group_id: UUID | None = None,
     ) -> None:
-        await self._invoice_po_mapping_repo.delete_mappings_for_invoice(
-            invoice_id,
-        )
-        await self._allocation_repo.cancel_pending_for_invoice(
-            invoice_id,
-        )
+        if resolution_group_id is None:
+            resolution_groups = (
+                await self._resolution_group_repo.get_groups_for_invoice(
+                    invoice_id,
+                )
+            )
+            if len(resolution_groups) == 1:
+                resolution_group_id = resolution_groups[0].id
 
-        logger.info(
-            "Cleared PO mappings and pending allocations",
-            extra={
-                "invoice_id": str(invoice_id),
-            },
+        unit_price_by_line = {
+            line.id: line.unit_price
+            for line in invoice_lines
+        }
+
+        groups: list[AllocationCandidateGroupCreate] = []
+
+        for plan in plans:
+            group_type = (
+                candidate_type
+                if len(plans) == 1
+                else POResolutionCandidateType.AMBIGUOUS
+            )
+            items: list[AllocationCandidateItemCreate] = []
+
+            for record in plan:
+                unit_price = unit_price_by_line.get(
+                    record.invoice_line_item_id,
+                    Decimal(0),
+                )
+                allocated_amount = (
+                    record.allocated_quantity * unit_price
+                ).quantize(
+                    Decimal("0.01"),
+                )
+                items.append(
+                    AllocationCandidateItemCreate(
+                        invoice_line_item_id=record.invoice_line_item_id,
+                        po_line_item_id=record.po_line_item_id,
+                        allocated_quantity=record.allocated_quantity,
+                        allocated_amount=allocated_amount,
+                        candidate_type=group_type,
+                    ),
+                )
+
+            groups.append(
+                AllocationCandidateGroupCreate(
+                    resolution_group_id=resolution_group_id,
+                    candidate_type=group_type,
+                    items=items,
+                ),
+            )
+
+        await self._allocation_candidate_repo.replace_groups_for_invoice(
+            invoice_id=invoice_id,
+            groups=groups,
         )
 
     async def _persist_issues(

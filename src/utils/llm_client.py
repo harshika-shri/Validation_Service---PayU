@@ -12,13 +12,16 @@ from pydantic import ValidationError
 from src.config.llm_config import (
     ADDRESS_MATCH_PROMPT,
     COMPANY_NAME_MATCH_PROMPT,
-    LINE_ITEM_MATCH_PROMPT,
+    FUZZY_MATCH_PROMPT,
     REVIEW_SUMMARY_PROMPT,
     VENDOR_NAME_MATCH_PROMPT,
 )
 from src.config.settings import settings
 from src.core.exceptions.llm_exc import LLMServiceError
-from src.schemas.semantic_match_schema import SemanticMatchResult
+from src.schemas.semantic_match_schema import (
+    FuzzyMatchResult,
+    SemanticMatchResult,
+)
 
 _GROQ_HTTP_HEADERS = {
     "Content-Type": "application/json",
@@ -332,6 +335,53 @@ def _parse_semantic_match(
         ) from error
 
 
+_FUZZY_MATCH_CONFIDENCE_THRESHOLD = 0.90
+
+
+def _parse_fuzzy_match(
+    response_text: str,
+) -> FuzzyMatchResult:
+    json_text = extract_json_text(
+        response_text,
+    )
+
+    try:
+        return FuzzyMatchResult.model_validate_json(
+            json_text,
+        )
+    except ValidationError as error:
+        preview = json_text[:200]
+        raise LLMServiceError(
+            "LLM returned invalid fuzzy match JSON: "
+            f"{error}. Preview: {preview}",
+            provider="groq",
+        ) from error
+
+
+def _apply_fuzzy_match_threshold(
+    result: FuzzyMatchResult,
+) -> SemanticMatchResult:
+    if (
+        result.is_match
+        and result.confidence
+        <= _FUZZY_MATCH_CONFIDENCE_THRESHOLD
+    ):
+        return SemanticMatchResult(
+            is_match=False,
+            reason=(
+                f"Confidence {result.confidence:.2f} is below the "
+                f"automatic match threshold "
+                f"({_FUZZY_MATCH_CONFIDENCE_THRESHOLD:.2f}). "
+                f"{result.reason}"
+            ).strip(),
+        )
+
+    return SemanticMatchResult(
+        is_match=result.is_match,
+        reason=result.reason,
+    )
+
+
 def compare_company_names_semantically(
     extracted: str,
     master: str,
@@ -387,7 +437,7 @@ def compare_line_items_semantically(
     extracted: str,
     master: str,
 ) -> SemanticMatchResult:
-    prompt = LINE_ITEM_MATCH_PROMPT.format(
+    prompt = FUZZY_MATCH_PROMPT.format(
         extracted=extracted,
         master=master,
     )
@@ -395,8 +445,12 @@ def compare_line_items_semantically(
         prompt,
     )
 
-    return _parse_semantic_match(
+    fuzzy_result = _parse_fuzzy_match(
         response_text,
+    )
+
+    return _apply_fuzzy_match_threshold(
+        fuzzy_result,
     )
 
 

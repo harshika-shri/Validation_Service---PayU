@@ -3,15 +3,15 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from src.control.agents.line_allocation_search import (
+from src.control.agents.po_resolution.line_allocation_search import (
     LineMatchEdge,
 )
 from src.core.exceptions.llm_exc import LLMServiceError
 from src.data.models.postgres.enums import AllocationMatchType
-from src.data.repositories.invoice_line_item_repository import (
+from src.data.repositories.line_item_validation.invoice_line_item_repository import (
     InvoiceLineItemRecord,
 )
-from src.data.repositories.po_line_item_repository import (
+from src.data.repositories.po_resolution.po_line_item_repository import (
     POLineItemRecord,
 )
 from src.utils.llm_client import (

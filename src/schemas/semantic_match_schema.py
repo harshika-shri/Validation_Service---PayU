@@ -8,3 +8,15 @@ class SemanticMatchResult(BaseModel):
     reason: str = Field(
         default="",
     )
+
+
+class FuzzyMatchResult(BaseModel):
+    is_match: bool
+    confidence: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+    )
+    reason: str = Field(
+        default="",
+    )

@@ -2,16 +2,25 @@ from __future__ import annotations
 
 RECOVERY_MESSAGES: dict[str, str] = {
     "MISSING_INVOICE_NUMBER": (
-        "Missing invoice number was generated automatically by the system."
+        "Missing invoice number was recovered from the associated email."
     ),
     "VENDOR_NOT_FOUND": (
         "Vendor was successfully identified after initial lookup "
         "did not find a direct match."
     ),
+    "PO_MISSING": (
+        "No PO number could be extracted from the invoice."
+    ),
+    "PO_RECOVERED": (
+        "A replacement PO candidate was identified using vendor, date, "
+        "and invoice content after the extracted PO reference could not "
+        "be used."
+    ),
+    "PO_RESOLUTION_BLOCKED": (
+        "PO resolution could not proceed because vendor resolution failed."
+    ),
     "PO_NOT_FOUND": (
-        "The invoice did not include a purchase order number. "
-        "The system automatically matched the invoice to the "
-        "correct purchase order(s)."
+        "No PO number could be extracted from the invoice."
     ),
     "INVALID_PO_REFERENCE": (
         "The purchase order number on the invoice did not match "
@@ -20,39 +29,93 @@ RECOVERY_MESSAGES: dict[str, str] = {
     ),
 }
 
+WAIVED_MESSAGES: dict[str, str] = {
+    "MISSING_INVOICE_NUMBER": (
+        "Original invoice number could not be recovered. "
+        "A system-generated invoice identifier was assigned to allow processing."
+    ),
+}
+
 OPEN_ISSUE_MESSAGES: dict[str, str] = {
     "MISSING_INVOICE_NUMBER": (
         "Invoice number is missing on the submitted invoice."
     ),
     "VENDOR_NOT_FOUND": (
-        "Vendor could not be matched to a vendor master record."
+        "Unable to resolve a vendor from the extracted invoice details."
+    ),
+    "VENDOR_DETAILS_MISSING": (
+        "Vendor name, GSTIN, and address could not be extracted from "
+        "the invoice."
+    ),
+    "MISSING_VENDOR_NAME": (
+        "Vendor name could not be extracted from the invoice."
+    ),
+    "MISSING_VENDOR_GSTIN": (
+        "Vendor GSTIN could not be extracted from the invoice."
+    ),
+    "MISSING_VENDOR_ADDRESS": (
+        "Vendor address could not be extracted from the invoice."
+    ),
+    "VENDOR_NAME_MISMATCH": (
+        "Extracted vendor name does not match the resolved vendor master "
+        "record."
     ),
     "PO_NOT_FOUND": (
         "Referenced purchase order number was not found."
     ),
+    "PO_MISSING": (
+        "No PO number could be extracted from the invoice."
+    ),
+    "PO_RECOVERED": (
+        "A replacement PO candidate was identified after the extracted "
+        "PO reference could not be used."
+    ),
+    "PO_RESOLUTION_BLOCKED": (
+        "PO resolution could not proceed because vendor resolution failed."
+    ),
     "INVALID_PO_REFERENCE": (
-        "Referenced purchase order does not match resolved coverage."
+        "Extracted PO number does not exist in the system."
+    ),
+    "COMPANY_DETAILS_MISSING": (
+        "Buyer company name, GSTIN, and address could not be extracted "
+        "from the invoice."
+    ),
+    "MISSING_COMPANY_NAME": (
+        "Buyer company name could not be extracted from the invoice."
+    ),
+    "MISSING_COMPANY_GSTIN": (
+        "Buyer company GSTIN could not be extracted from the invoice."
+    ),
+    "MISSING_COMPANY_ADDRESS": (
+        "Buyer company address could not be extracted from the invoice."
     ),
     "COMPANY_NAME_MISMATCH": (
-        "Buyer company name differs from the company master record."
+        "Extracted buyer company name does not match the active company "
+        "master record."
     ),
     "COMPANY_GSTIN_MISMATCH": (
-        "Buyer GSTIN differs from the company master record."
+        "Extracted buyer company GSTIN does not match the active company "
+        "master record."
     ),
     "COMPANY_PAN_MISMATCH": (
-        "Buyer PAN differs from the company master record."
+        "Extracted buyer company PAN does not match the active company "
+        "master record."
     ),
     "COMPANY_ADDRESS_MISMATCH": (
-        "Buyer billing address differs from the company master record."
+        "Extracted buyer company address does not match the active company "
+        "master record."
     ),
     "COMPANY_SHIPPING_ADDRESS_MISMATCH": (
-        "Buyer shipping address differs from the company master record."
+        "Extracted buyer company shipping address does not match the active "
+        "company master record."
     ),
     "COMPANY_EMAIL_MISMATCH": (
-        "Buyer email differs from the company master record."
+        "Extracted buyer company email does not match the active company "
+        "master record."
     ),
     "COMPANY_PHONE_MISMATCH": (
-        "Buyer phone number differs from the company master record."
+        "Extracted buyer company phone number does not match the active "
+        "company master record."
     ),
     "COMPANY_BANK_ACCOUNT_MISMATCH": (
         "Buyer bank account differs from the company master record."
@@ -70,22 +133,28 @@ OPEN_ISSUE_MESSAGES: dict[str, str] = {
         "Multiple vendor master records match the extracted vendor details."
     ),
     "VENDOR_GSTIN_MISMATCH": (
-        "Vendor GSTIN differs from the vendor master record."
+        "Extracted vendor GSTIN does not match the resolved vendor master "
+        "record."
     ),
     "VENDOR_PHONE_MISMATCH": (
-        "Vendor phone number differs from the vendor master record."
+        "Extracted vendor phone number does not match the resolved vendor "
+        "master record."
     ),
     "VENDOR_ADDRESS_MISMATCH": (
-        "Vendor address differs from the vendor master record."
+        "Extracted vendor address does not match the resolved vendor master "
+        "record."
     ),
     "VENDOR_BANK_ACCOUNT_MISMATCH": (
-        "Vendor bank account differs from the vendor master record."
+        "Extracted vendor bank account number does not match the resolved "
+        "vendor master record."
     ),
     "VENDOR_IFSC_MISMATCH": (
-        "Vendor IFSC code differs from the vendor master record."
+        "Extracted vendor IFSC code does not match the resolved vendor "
+        "master record."
     ),
     "VENDOR_BANK_NAME_MISMATCH": (
-        "Vendor bank name differs from the vendor master record."
+        "Extracted vendor bank name does not match the resolved vendor "
+        "master record."
     ),
     "VENDOR_BLACKLISTED": (
         "Vendor is blacklisted in the vendor master."
@@ -97,13 +166,15 @@ OPEN_ISSUE_MESSAGES: dict[str, str] = {
         "Referenced purchase order is closed."
     ),
     "PO_UNRESOLVED": (
-        "Purchase order coverage could not be resolved for this invoice."
+        "No suitable PO candidate could be identified."
     ),
     "PO_AMBIGUOUS": (
-        "Multiple valid purchase order combinations were found."
+        "Multiple PO candidates satisfy the invoice and the system "
+        "cannot confidently determine the correct one."
     ),
     "PO_VENDOR_CONFLICT": (
-        "Resolved purchase order belongs to a different vendor."
+        "Resolved PO belongs to a vendor that conflicts with the vendor "
+        "extracted from the invoice."
     ),
     "MISSING_PO_COVERAGE": (
         "One or more invoice lines lack purchase order coverage."
@@ -204,9 +275,18 @@ VENDOR_CLARIFICATION_TOPICS: dict[str, str] = {
     "PO_NOT_FOUND": "Verify correct purchase order reference.",
     "INVALID_PO_REFERENCE": "Verify correct purchase order reference.",
     "VENDOR_NOT_FOUND": "Confirm vendor identity details.",
+    "VENDOR_DETAILS_MISSING": "Confirm vendor identity details.",
+    "MISSING_VENDOR_NAME": "Confirm vendor name.",
+    "MISSING_VENDOR_GSTIN": "Confirm vendor GSTIN.",
+    "MISSING_VENDOR_ADDRESS": "Confirm vendor address.",
+    "VENDOR_NAME_MISMATCH": "Confirm vendor name details.",
     "COMPANY_NAME_MISMATCH": "Confirm buyer company details.",
     "COMPANY_GSTIN_MISMATCH": "Confirm GSTIN details.",
     "COMPANY_PAN_MISMATCH": "Confirm PAN details.",
+    "COMPANY_DETAILS_MISSING": "Confirm buyer company details.",
+    "MISSING_COMPANY_NAME": "Confirm buyer company name.",
+    "MISSING_COMPANY_GSTIN": "Confirm buyer company GSTIN.",
+    "MISSING_COMPANY_ADDRESS": "Confirm buyer company address.",
     "COMPANY_ADDRESS_MISMATCH": "Confirm buyer address details.",
     "COMPANY_SHIPPING_ADDRESS_MISMATCH": "Confirm shipping address details.",
     "COMPANY_EMAIL_MISMATCH": "Confirm buyer contact email.",
@@ -256,7 +336,7 @@ def recovery_message_for_issue(
         resolved_po_numbers,
     )
 
-    if issue_code == "PO_NOT_FOUND":
+    if issue_code == "PO_MISSING":
         return (
             "The invoice did not include a purchase order number. "
             f"The system matched it to {po_list}."
@@ -272,6 +352,15 @@ def recovery_message_for_issue(
     return (
         f"{base_message.rstrip('.')}. "
         f"Matched purchase order(s): {po_list}."
+    )
+
+
+def waived_message_for_issue(
+    issue_code: str,
+) -> str:
+    return WAIVED_MESSAGES.get(
+        issue_code,
+        "A validation issue was waived to allow processing to continue.",
     )
 
 

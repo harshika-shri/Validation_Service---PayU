@@ -7,12 +7,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
-from src.data.models.postgres.enums import AllocationStatus
 from src.data.models.postgres.invoice_line_items import InvoiceLineItem
-from src.data.models.postgres.invoice_line_po_allocations import (
-    InvoiceLinePOAllocation,
-)
-from src.data.models.postgres.invoice_po_mapping import InvoicePOMapping
 from src.data.models.postgres.invoices import Invoice
 from src.data.repositories.base_repo import BaseRepository
 from src.utils.duplicate_detection_utils import (
@@ -119,10 +114,7 @@ class DuplicateDetectionRepository(BaseRepository):
         self,
         invoice_id: UUID,
     ) -> InvoiceBusinessContent:
-        po_ids = await self._get_po_ids(
-            invoice_id,
-        )
-        allocations = await self._get_allocations(
+        invoice = await self.get_invoice_by_id(
             invoice_id,
         )
         line_items = await self._get_line_item_fingerprints(
@@ -133,69 +125,13 @@ class DuplicateDetectionRepository(BaseRepository):
         )
 
         return InvoiceBusinessContent(
-            po_ids=po_ids,
-            allocations=allocations,
+            invoice_date=(
+                invoice.invoice_date
+                if invoice is not None
+                else None
+            ),
             line_items=line_items,
             total_amount=total_amount,
-        )
-
-    async def _get_po_ids(
-        self,
-        invoice_id: UUID,
-    ) -> frozenset[UUID]:
-        stmt = select(
-            InvoicePOMapping.po_id,
-        ).where(
-            InvoicePOMapping.invoice_id == invoice_id,
-        )
-
-        result = await self.execute(
-            stmt,
-        )
-
-        return frozenset(
-            result.scalars().all(),
-        )
-
-    async def _get_allocations(
-        self,
-        invoice_id: UUID,
-    ) -> frozenset[tuple[UUID, UUID, Decimal]]:
-        stmt = (
-            select(
-                InvoiceLinePOAllocation.po_id,
-                InvoiceLinePOAllocation.po_line_item_id,
-                InvoiceLinePOAllocation.allocated_quantity,
-            )
-            .join(
-                InvoiceLineItem,
-                InvoiceLineItem.id
-                == InvoiceLinePOAllocation.invoice_line_item_id,
-            )
-            .where(
-                InvoiceLineItem.invoice_id == invoice_id,
-                InvoiceLinePOAllocation.allocation_status.in_(
-                    [
-                        AllocationStatus.PENDING.value,
-                        AllocationStatus.COMMITTED.value,
-                    ],
-                ),
-            )
-        )
-
-        result = await self.execute(
-            stmt,
-        )
-
-        return frozenset(
-            (
-                row.po_id,
-                row.po_line_item_id,
-                row.allocated_quantity.quantize(
-                    Decimal("0.001"),
-                ),
-            )
-            for row in result.all()
         )
 
     async def _get_line_item_fingerprints(

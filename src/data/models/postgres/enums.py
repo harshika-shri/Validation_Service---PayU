@@ -69,19 +69,23 @@ class IssueType(str, Enum):
 
 class ValidationIssueStatus(str, Enum):
     OPEN = "open"
+    PENDING_REVIEW = "pending_review"
     RESOLVED = "resolved"
-
-
-class IssueDecisionCategory(str, Enum):
-    APPROVE = "approve"
-    PARTIAL_APPROVE = "partial_approve"
-    REJECT = "reject"
+    WAIVED = "waived"
 
 
 class InvoiceValidationDecision(str, Enum):
     APPROVED_AND_READY_TO_PAY = "approved_and_ready_to_pay"
     PARTIAL_APPROVE = "partial_approve"
     REJECT = "reject"
+
+
+class InvoiceValidationOutcome(str, Enum):
+    RESOLVED = "resolved"
+    RECOVERED = "recovered"
+    AMBIGUOUS = "ambiguous"
+    UNRESOLVED = "unresolved"
+    DUPLICATE = "duplicate"
 
 
 class AllocationMatchType(str, Enum):
@@ -101,3 +105,9 @@ class ValidationFlowOutcome(str, Enum):
     CONTINUE = "continue"
     REROUTE = "reroute"
     HARD_STOP = "hard_stop"
+
+
+class POResolutionCandidateType(str, Enum):
+    RESOLVED = "resolved"
+    RECOVERED = "recovered"
+    AMBIGUOUS = "ambiguous"

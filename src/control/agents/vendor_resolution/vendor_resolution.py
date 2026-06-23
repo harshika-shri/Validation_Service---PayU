@@ -12,15 +12,15 @@ from src.data.models.postgres.enums import (
     ValidationIssueStatus,
     VendorStatus,
 )
-from src.data.repositories.invoice_extracted_vendor_repository import (
+from src.data.repositories.vendor_resolution.invoice_extracted_vendor_repository import (
     ExtractedVendorRecord,
     InvoiceExtractedVendorRepository,
 )
-from src.data.repositories.validation_issue_repository import (
+from src.data.repositories.shared.validation_issue_repository import (
     ValidationIssueCreate,
     ValidationIssueRepository,
 )
-from src.data.repositories.vendor_repository import (
+from src.data.repositories.vendor_resolution.vendor_repository import (
     VendorRecord,
     VendorRepository,
 )
@@ -29,6 +29,7 @@ from src.utils.company_matching_utils import (
     normalize_address,
     normalize_bank_account,
     normalize_bank_name,
+    normalize_company_name_for_exact_match,
     normalize_gstin,
     normalize_ifsc,
     normalize_phone,
@@ -42,9 +43,14 @@ logger = logging.getLogger(__name__)
 
 CHECK_STAGE = "vendor_resolution"
 
+VENDOR_DETAILS_MISSING = "VENDOR_DETAILS_MISSING"
+MISSING_VENDOR_NAME = "MISSING_VENDOR_NAME"
+MISSING_VENDOR_GSTIN = "MISSING_VENDOR_GSTIN"
+MISSING_VENDOR_ADDRESS = "MISSING_VENDOR_ADDRESS"
 DUPLICATE_VENDOR_GSTIN = "DUPLICATE_VENDOR_GSTIN"
 AMBIGUOUS_VENDOR = "AMBIGUOUS_VENDOR"
 VENDOR_NOT_FOUND = "VENDOR_NOT_FOUND"
+VENDOR_NAME_MISMATCH = "VENDOR_NAME_MISMATCH"
 VENDOR_GSTIN_MISMATCH = "VENDOR_GSTIN_MISMATCH"
 VENDOR_PHONE_MISMATCH = "VENDOR_PHONE_MISMATCH"
 VENDOR_ADDRESS_MISMATCH = "VENDOR_ADDRESS_MISMATCH"
@@ -53,6 +59,10 @@ VENDOR_IFSC_MISMATCH = "VENDOR_IFSC_MISMATCH"
 VENDOR_BANK_NAME_MISMATCH = "VENDOR_BANK_NAME_MISMATCH"
 VENDOR_BLACKLISTED = "VENDOR_BLACKLISTED"
 VENDOR_SUSPENDED = "VENDOR_SUSPENDED"
+
+VENDOR_NOT_FOUND_DESCRIPTION = (
+    "Unable to resolve a vendor from the extracted invoice details."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,14 +117,15 @@ class VendorResolutionAgent:
                 invoice_id=invoice_id,
                 pending_issues=[
                     PendingIssue(
-                        issue_code=VENDOR_NOT_FOUND,
-                        check_name="vendor_resolution",
-                        field_name="vendor_name",
+                        issue_code=VENDOR_DETAILS_MISSING,
+                        check_name="vendor_details_missing",
+                        field_name="vendor_details",
                         issue_type=IssueType.MISSING,
                         expected_value=None,
                         actual_value=None,
                         description=(
-                            "No extracted vendor record found for invoice."
+                            "Vendor name, GSTIN, and address could not "
+                            "be extracted from the invoice."
                         ),
                     ),
                 ],
@@ -125,6 +136,30 @@ class VendorResolutionAgent:
                 po_id=state.get("po_id"),
                 issue_codes=issue_codes,
             )
+
+        missing_issues = self._validate_mandatory_fields_missing(
+            extracted=extracted,
+        )
+
+        if self._all_mandatory_fields_missing(
+            extracted=extracted,
+        ):
+            issue_codes = await self._finish_with_issues(
+                invoice_id=invoice_id,
+                pending_issues=missing_issues,
+                issue_codes=issue_codes,
+            )
+            return build_validation_state(
+                invoice_id=invoice_id,
+                po_id=state.get("po_id"),
+                issue_codes=issue_codes,
+            )
+
+        issue_codes = await self._finish_with_issues(
+            invoice_id=invoice_id,
+            pending_issues=missing_issues,
+            issue_codes=issue_codes,
+        )
 
         resolved_vendor, pending_issues, stop = (
             await self._resolve_vendor(
@@ -154,10 +189,7 @@ class VendorResolutionAgent:
                     issue_type=IssueType.MISSING,
                     expected_value=None,
                     actual_value=extracted.vendor_name,
-                    description=(
-                        "Could not resolve vendor from extracted "
-                        "invoice vendor details."
-                    ),
+                    description=VENDOR_NOT_FOUND_DESCRIPTION,
                 ),
             )
             issue_codes = await self._finish_with_issues(
@@ -228,6 +260,116 @@ class VendorResolutionAgent:
             po_id=state.get("po_id"),
             issue_codes=issue_codes,
         )
+
+    @staticmethod
+    def _has_vendor_address(
+        extracted: ExtractedVendorRecord,
+    ) -> bool:
+        return has_text(
+            extracted.address,
+        )
+
+    @staticmethod
+    def _all_mandatory_fields_missing(
+        extracted: ExtractedVendorRecord,
+    ) -> bool:
+        return (
+            not has_text(
+                extracted.vendor_name,
+            )
+            and not has_text(
+                extracted.vendor_gstin,
+            )
+            and not VendorResolutionAgent._has_vendor_address(
+                extracted,
+            )
+        )
+
+    def _validate_mandatory_fields_missing(
+        self,
+        extracted: ExtractedVendorRecord,
+    ) -> list[PendingIssue]:
+        vendor_name_missing = not has_text(
+            extracted.vendor_name,
+        )
+        vendor_gstin_missing = not has_text(
+            extracted.vendor_gstin,
+        )
+        vendor_address_missing = not self._has_vendor_address(
+            extracted,
+        )
+
+        if (
+            vendor_name_missing
+            and vendor_gstin_missing
+            and vendor_address_missing
+        ):
+            return [
+                PendingIssue(
+                    issue_code=VENDOR_DETAILS_MISSING,
+                    check_name="vendor_details_missing",
+                    field_name="vendor_details",
+                    issue_type=IssueType.MISSING,
+                    expected_value=None,
+                    actual_value=None,
+                    description=(
+                        "Vendor name, GSTIN, and address could not be "
+                        "extracted from the invoice."
+                    ),
+                ),
+            ]
+
+        pending_issues: list[PendingIssue] = []
+
+        if vendor_name_missing:
+            pending_issues.append(
+                PendingIssue(
+                    issue_code=MISSING_VENDOR_NAME,
+                    check_name="vendor_name_missing",
+                    field_name="vendor_name",
+                    issue_type=IssueType.MISSING,
+                    expected_value=None,
+                    actual_value=None,
+                    description=(
+                        "Vendor name could not be extracted from the "
+                        "invoice."
+                    ),
+                ),
+            )
+
+        if vendor_gstin_missing:
+            pending_issues.append(
+                PendingIssue(
+                    issue_code=MISSING_VENDOR_GSTIN,
+                    check_name="vendor_gstin_missing",
+                    field_name="vendor_gstin",
+                    issue_type=IssueType.MISSING,
+                    expected_value=None,
+                    actual_value=None,
+                    description=(
+                        "Vendor GSTIN could not be extracted from the "
+                        "invoice."
+                    ),
+                ),
+            )
+
+        if vendor_address_missing:
+            pending_issues.append(
+                PendingIssue(
+                    issue_code=MISSING_VENDOR_ADDRESS,
+                    check_name="vendor_address_missing",
+                    field_name="vendor_address",
+                    issue_type=IssueType.MISSING,
+                    expected_value=None,
+                    actual_value=None,
+                    description=(
+                        "Vendor address could not be extracted from the "
+                        "invoice."
+                    ),
+                ),
+            )
+
+        return pending_issues
 
     async def _resolve_vendor(
         self,
@@ -324,10 +466,7 @@ class VendorResolutionAgent:
                 issue_code=VENDOR_NOT_FOUND,
                 expected_value=None,
                 actual_value=extracted.vendor_name,
-                description=(
-                    "Vendor could not be resolved from extracted "
-                    "invoice vendor details."
-                ),
+                description=VENDOR_NOT_FOUND_DESCRIPTION,
                 status=ValidationIssueStatus.OPEN,
             ),
         )
@@ -508,10 +647,7 @@ class VendorResolutionAgent:
                         issue_type=IssueType.MISSING,
                         expected_value=None,
                         actual_value=vendor_name,
-                        description=(
-                            "No vendor matched extracted vendor name "
-                            "using LLM resolution."
-                        ),
+                        description=VENDOR_NOT_FOUND_DESCRIPTION,
                     ),
                 ),
             )
@@ -546,6 +682,12 @@ class VendorResolutionAgent:
     ) -> list[PendingIssue]:
         issues: list[PendingIssue] = []
 
+        issues.extend(
+            self._verify_vendor_name(
+                extracted=extracted,
+                vendor=vendor,
+            ),
+        )
         issues.extend(
             self._verify_gstin(
                 extracted=extracted,
@@ -585,6 +727,55 @@ class VendorResolutionAgent:
 
         return issues
 
+    def _verify_vendor_name(
+        self,
+        extracted: ExtractedVendorRecord,
+        vendor: VendorRecord,
+    ) -> list[PendingIssue]:
+        if not has_text(
+            extracted.vendor_name,
+        ):
+            return []
+
+        extracted_name = extracted.vendor_name
+        assert extracted_name is not None
+
+        if normalize_company_name_for_exact_match(
+            extracted_name,
+        ) == normalize_company_name_for_exact_match(
+            vendor.vendor_name,
+        ):
+            return []
+
+        try:
+            match_result = compare_vendor_names_semantically(
+                extracted=extracted_name,
+                master=vendor.vendor_name,
+            )
+        except LLMServiceError:
+            logger.exception(
+                "LLM vendor name verification failed",
+            )
+            return []
+
+        if match_result.is_match:
+            return []
+
+        return [
+            PendingIssue(
+                issue_code=VENDOR_NAME_MISMATCH,
+                check_name="vendor_name_verification",
+                field_name="vendor_name",
+                issue_type=IssueType.MISMATCH,
+                expected_value=vendor.vendor_name,
+                actual_value=extracted_name,
+                description=(
+                    "Extracted vendor name does not match the resolved "
+                    "vendor master record."
+                ),
+            ),
+        ]
+
     def _verify_gstin(
         self,
         extracted: ExtractedVendorRecord,
@@ -617,8 +808,8 @@ class VendorResolutionAgent:
                 expected_value=vendor.gstin,
                 actual_value=extracted_gstin,
                 description=(
-                    "Extracted vendor GSTIN does not match resolved "
-                    "vendor GSTIN."
+                    "Extracted vendor GSTIN does not match the resolved "
+                    "vendor master record."
                 ),
             ),
         ]
@@ -660,8 +851,8 @@ class VendorResolutionAgent:
                 expected_value=vendor_phone,
                 actual_value=extracted_phone,
                 description=(
-                    "Extracted vendor phone does not match resolved "
-                    "vendor phone."
+                    "Extracted vendor phone number does not match the "
+                    "resolved vendor master record."
                 ),
             ),
         ]
@@ -720,8 +911,8 @@ class VendorResolutionAgent:
                 expected_value=vendor_address,
                 actual_value=extracted_address,
                 description=(
-                    "Extracted vendor address does not match resolved "
-                    f"vendor address. {match_result.reason}"
+                    "Extracted vendor address does not match the resolved "
+                    "vendor master record."
                 ),
             ),
         ]
@@ -763,8 +954,8 @@ class VendorResolutionAgent:
                 expected_value=vendor_account,
                 actual_value=extracted_account,
                 description=(
-                    "Extracted vendor bank account does not match "
-                    "resolved vendor bank account."
+                    "Extracted vendor bank account number does not match "
+                    "the resolved vendor master record."
                 ),
             ),
         ]
@@ -806,8 +997,8 @@ class VendorResolutionAgent:
                 expected_value=vendor_ifsc,
                 actual_value=extracted_ifsc,
                 description=(
-                    "Extracted vendor IFSC does not match resolved "
-                    "vendor IFSC."
+                    "Extracted vendor IFSC code does not match the "
+                    "resolved vendor master record."
                 ),
             ),
         ]
@@ -849,8 +1040,8 @@ class VendorResolutionAgent:
                 expected_value=vendor_bank_name,
                 actual_value=extracted_bank_name,
                 description=(
-                    "Extracted vendor bank name does not match "
-                    "resolved vendor bank name."
+                    "Extracted vendor bank name does not match the "
+                    "resolved vendor master record."
                 ),
             ),
         ]

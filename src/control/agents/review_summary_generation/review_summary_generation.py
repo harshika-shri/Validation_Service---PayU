@@ -11,22 +11,23 @@ from src.core.exceptions.llm_exc import LLMServiceError
 from src.core.exceptions.validation_exc import InvoiceNotFoundError
 from src.data.models.postgres.enums import (
     InvoiceValidationDecision,
+    InvoiceValidationOutcome,
     ValidationIssueStatus,
 )
-from src.data.repositories.invoice_po_mapping_repository import (
-    InvoicePOMappingRepository,
+from src.data.repositories.po_resolution.invoice_po_resolution_group_repository import (
+    InvoicePOResolutionGroupRepository,
 )
-from src.data.repositories.invoice_repository import (
+from src.data.repositories.invoice_header_resolution.invoice_repository import (
     InvoiceRepository,
 )
-from src.data.repositories.invoice_review_summary_repository import (
+from src.data.repositories.review_summary_generation.invoice_review_summary_repository import (
     InvoiceReviewSummaryRepository,
     ReviewSummaryUpsert,
 )
-from src.data.repositories.purchase_order_repository import (
+from src.data.repositories.po_resolution.purchase_order_repository import (
     PurchaseOrderRepository,
 )
-from src.data.repositories.validation_issue_repository import (
+from src.data.repositories.shared.validation_issue_repository import (
     InvoiceIssueDetailRecord,
     ValidationIssueRepository,
 )
@@ -38,6 +39,7 @@ from src.utils.review_summary_language import (
     deduplicate_messages,
     open_issue_message_for_issue,
     recovery_message_for_issue,
+    waived_message_for_issue,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,14 @@ _DECISION_LABELS = {
     InvoiceValidationDecision.REJECT.value: "REJECT",
 }
 
+_OUTCOME_LABELS = {
+    InvoiceValidationOutcome.RESOLVED.value: "RESOLVED",
+    InvoiceValidationOutcome.RECOVERED.value: "RECOVERED",
+    InvoiceValidationOutcome.AMBIGUOUS.value: "AMBIGUOUS",
+    InvoiceValidationOutcome.UNRESOLVED.value: "UNRESOLVED",
+    InvoiceValidationOutcome.DUPLICATE.value: "DUPLICATE",
+}
+
 
 class ReviewSummaryGenerationAgent:
     def __init__(
@@ -59,13 +69,13 @@ class ReviewSummaryGenerationAgent:
         invoice_repo: InvoiceRepository,
         validation_issue_repo: ValidationIssueRepository,
         review_summary_repo: InvoiceReviewSummaryRepository,
-        invoice_po_mapping_repo: InvoicePOMappingRepository,
+        resolution_group_repo: InvoicePOResolutionGroupRepository,
         purchase_order_repo: PurchaseOrderRepository,
     ) -> None:
         self._invoice_repo = invoice_repo
         self._validation_issue_repo = validation_issue_repo
         self._review_summary_repo = review_summary_repo
-        self._invoice_po_mapping_repo = invoice_po_mapping_repo
+        self._resolution_group_repo = resolution_group_repo
         self._purchase_order_repo = purchase_order_repo
 
     async def run(
@@ -92,6 +102,9 @@ class ReviewSummaryGenerationAgent:
                 InvoiceValidationDecision.APPROVED_AND_READY_TO_PAY.value,
             ),
         )
+        validation_outcome_value = state.get(
+            "invoice_status",
+        )
 
         invoice = await self._invoice_repo.get_review_summary_invoice(
             invoice_id,
@@ -100,6 +113,15 @@ class ReviewSummaryGenerationAgent:
         if invoice is None:
             raise InvoiceNotFoundError(
                 invoice_id=invoice_id,
+            )
+
+        validation_outcome = invoice.validation_outcome
+
+        if validation_outcome is None and validation_outcome_value is not None:
+            validation_outcome = InvoiceValidationOutcome(
+                str(
+                    validation_outcome_value,
+                ),
             )
 
         invoice_issues = (
@@ -124,6 +146,7 @@ class ReviewSummaryGenerationAgent:
             invoice_issues=invoice_issues,
         )
         executive_summary = self._generate_executive_summary(
+            validation_outcome=validation_outcome,
             decision=decision_value,
             invoice_number=invoice.invoice_number,
             vendor_name=invoice.vendor_name,
@@ -144,11 +167,18 @@ class ReviewSummaryGenerationAgent:
             ),
         )
 
+        outcome_value = (
+            validation_outcome.value
+            if validation_outcome is not None
+            else None
+        )
+
         logger.info(
             "Completed review summary generation",
             extra={
                 "invoice_id": str(invoice_id),
                 "decision": decision_value,
+                "validation_outcome": outcome_value,
                 "recovery_count": len(system_recoveries),
                 "open_issue_count": len(open_issues),
                 "clarification_count": len(vendor_clarifications),
@@ -166,14 +196,20 @@ class ReviewSummaryGenerationAgent:
                 [],
             ),
             "decision": decision_value,
-            "invoice_status": state.get(
-                "invoice_status",
-            ),
+            "invoice_status": outcome_value,
             "review_summary": {
                 "id": str(summary_record.id),
                 "decision": _DECISION_LABELS.get(
                     decision_value,
                     decision_value.upper(),
+                ),
+                "validation_outcome": (
+                    _OUTCOME_LABELS.get(
+                        outcome_value,
+                        outcome_value.upper()
+                        if outcome_value is not None
+                        else None,
+                    )
                 ),
                 "executive_summary": executive_summary,
                 "system_recoveries": system_recoveries,
@@ -188,10 +224,22 @@ class ReviewSummaryGenerationAgent:
         invoice_id: UUID,
     ) -> list[str]:
         po_ids = (
-            await self._invoice_po_mapping_repo.get_po_ids_by_invoice_id(
+            await self._resolution_group_repo.get_candidate_po_ids_for_validation(
                 invoice_id,
             )
         )
+
+        if not po_ids:
+            groups = (
+                await self._resolution_group_repo.get_groups_for_invoice(
+                    invoice_id,
+                )
+            )
+            po_ids = [
+                po_id
+                for group in groups
+                for po_id in group.po_ids
+            ]
 
         if not po_ids:
             return []
@@ -237,10 +285,26 @@ class ReviewSummaryGenerationAgent:
             in {
                 "MISSING_INVOICE_NUMBER",
                 "VENDOR_NOT_FOUND",
-                "PO_NOT_FOUND",
+                "PO_MISSING",
+                "PO_RECOVERED",
                 "INVALID_PO_REFERENCE",
             }
         ]
+        messages.extend(
+            waived_message_for_issue(
+                issue.issue_code,
+            )
+            for issue in invoice_issues
+            if issue.status == ValidationIssueStatus.WAIVED
+            and issue.issue_code
+            in {
+                "MISSING_INVOICE_NUMBER",
+                "VENDOR_NOT_FOUND",
+                "PO_MISSING",
+                "PO_RECOVERED",
+                "INVALID_PO_REFERENCE",
+            }
+        )
 
         return deduplicate_messages(
             messages,
@@ -255,7 +319,11 @@ class ReviewSummaryGenerationAgent:
                 issue.issue_code,
             )
             for issue in invoice_issues
-            if issue.status == ValidationIssueStatus.OPEN
+            if issue.status
+            in (
+                ValidationIssueStatus.OPEN,
+                ValidationIssueStatus.PENDING_REVIEW,
+            )
         ]
 
         return deduplicate_messages(
@@ -269,7 +337,10 @@ class ReviewSummaryGenerationAgent:
         topics: list[str] = []
 
         for issue in invoice_issues:
-            if issue.status != ValidationIssueStatus.OPEN:
+            if issue.status not in (
+                ValidationIssueStatus.OPEN,
+                ValidationIssueStatus.PENDING_REVIEW,
+            ):
                 continue
 
             topic = clarification_topic_for_issue(
@@ -289,6 +360,8 @@ class ReviewSummaryGenerationAgent:
 
     @staticmethod
     def _generate_executive_summary(
+        *,
+        validation_outcome: InvoiceValidationOutcome | None,
         decision: str,
         invoice_number: str | None,
         vendor_name: str | None,
@@ -298,8 +371,7 @@ class ReviewSummaryGenerationAgent:
         vendor_clarifications: list[str],
     ) -> str:
         if (
-            decision
-            == InvoiceValidationDecision.APPROVED_AND_READY_TO_PAY.value
+            validation_outcome == InvoiceValidationOutcome.RESOLVED
             and not open_issues
         ):
             return (
@@ -311,10 +383,50 @@ class ReviewSummaryGenerationAgent:
                 )
             )
 
+        if validation_outcome == InvoiceValidationOutcome.RECOVERED:
+            return (
+                ReviewSummaryGenerationAgent._build_recovered_summary(
+                    invoice_number=invoice_number,
+                    vendor_name=vendor_name,
+                    resolved_po_numbers=resolved_po_numbers,
+                    system_recoveries=system_recoveries,
+                    open_issues=open_issues,
+                )
+            )
+
+        if validation_outcome == InvoiceValidationOutcome.AMBIGUOUS:
+            return (
+                ReviewSummaryGenerationAgent._build_ambiguous_summary(
+                    invoice_number=invoice_number,
+                    vendor_name=vendor_name,
+                )
+            )
+
+        if validation_outcome == InvoiceValidationOutcome.UNRESOLVED:
+            return (
+                ReviewSummaryGenerationAgent._build_unresolved_summary(
+                    invoice_number=invoice_number,
+                    vendor_name=vendor_name,
+                )
+            )
+
+        if validation_outcome == InvoiceValidationOutcome.DUPLICATE:
+            return (
+                ReviewSummaryGenerationAgent._build_duplicate_summary(
+                    invoice_number=invoice_number,
+                    vendor_name=vendor_name,
+                )
+            )
+
         payload = {
             "decision": _DECISION_LABELS.get(
                 decision,
                 decision.upper(),
+            ),
+            "validation_outcome": (
+                validation_outcome.value.upper()
+                if validation_outcome is not None
+                else None
             ),
             "invoice_number": invoice_number,
             "vendor_name": vendor_name,
@@ -334,6 +446,7 @@ class ReviewSummaryGenerationAgent:
                 "using deterministic fallback",
             )
             return ReviewSummaryGenerationAgent._fallback_executive_summary(
+                validation_outcome=validation_outcome,
                 decision=decision,
                 invoice_number=invoice_number,
                 vendor_name=vendor_name,
@@ -378,8 +491,7 @@ class ReviewSummaryGenerationAgent:
             )
 
         sentences.append(
-            "All validation checks passed and no unresolved findings "
-            "remain.",
+            "Validation outcome: RESOLVED.",
         )
         sentences.append(
             "No vendor clarification is required.",
@@ -390,7 +502,110 @@ class ReviewSummaryGenerationAgent:
         )
 
     @staticmethod
+    def _build_recovered_summary(
+        *,
+        invoice_number: str | None,
+        vendor_name: str | None,
+        resolved_po_numbers: list[str],
+        system_recoveries: list[str],
+        open_issues: list[str],
+    ) -> str:
+        invoice_label = invoice_number or "This invoice"
+        vendor_label = (
+            f" from {vendor_name}"
+            if vendor_name
+            else ""
+        )
+        sentences = [
+            (
+                f"{invoice_label}{vendor_label} is partially "
+                "approved."
+            ),
+            "Validation outcome: RECOVERED.",
+        ]
+
+        if system_recoveries:
+            sentences.extend(
+                system_recoveries[:3],
+            )
+        elif resolved_po_numbers:
+            po_list = ", ".join(
+                resolved_po_numbers,
+            )
+            sentences.append(
+                f"Matched purchase order(s): {po_list}.",
+            )
+
+        if open_issues:
+            sentences.append(
+                "Open validation findings remain for review.",
+            )
+
+        return " ".join(
+            sentences[:6],
+        )
+
+    @staticmethod
+    def _build_ambiguous_summary(
+        *,
+        invoice_number: str | None,
+        vendor_name: str | None,
+    ) -> str:
+        invoice_label = invoice_number or "This invoice"
+        vendor_label = (
+            f" from {vendor_name}"
+            if vendor_name
+            else ""
+        )
+
+        return (
+            f"{invoice_label}{vendor_label} was rejected due to "
+            "multiple valid candidate solutions requiring human "
+            "selection. Validation outcome: AMBIGUOUS."
+        )
+
+    @staticmethod
+    def _build_unresolved_summary(
+        *,
+        invoice_number: str | None,
+        vendor_name: str | None,
+    ) -> str:
+        invoice_label = invoice_number or "This invoice"
+        vendor_label = (
+            f" from {vendor_name}"
+            if vendor_name
+            else ""
+        )
+
+        return (
+            f"{invoice_label}{vendor_label} was rejected because "
+            "required validation entities could not be resolved. "
+            "Validation outcome: UNRESOLVED."
+        )
+
+    @staticmethod
+    def _build_duplicate_summary(
+        *,
+        invoice_number: str | None,
+        vendor_name: str | None,
+    ) -> str:
+        invoice_label = invoice_number or "This invoice"
+        vendor_label = (
+            f" from {vendor_name}"
+            if vendor_name
+            else ""
+        )
+
+        return (
+            f"{invoice_label}{vendor_label} was rejected due to "
+            "duplicate invoice detection. Validation outcome: "
+            "DUPLICATE."
+        )
+
+    @staticmethod
     def _fallback_executive_summary(
+        *,
+        validation_outcome: InvoiceValidationOutcome | None,
         decision: str,
         invoice_number: str | None,
         vendor_name: str | None,
@@ -405,15 +620,22 @@ class ReviewSummaryGenerationAgent:
             if vendor_name
             else ""
         )
-        decision_label = _DECISION_LABELS.get(
-            decision,
-            decision.upper(),
+        outcome_label = (
+            _OUTCOME_LABELS.get(
+                validation_outcome.value,
+                validation_outcome.value.upper(),
+            )
+            if validation_outcome is not None
+            else _DECISION_LABELS.get(
+                decision,
+                decision.upper(),
+            )
         )
 
         sentences = [
             (
-                f"{invoice_label}{vendor_label} validation outcome is "
-                f"{decision_label}."
+                f"{invoice_label}{vendor_label} validation outcome "
+                f"is {outcome_label}."
             ),
         ]
 
@@ -431,20 +653,16 @@ class ReviewSummaryGenerationAgent:
 
         if open_issues:
             sentences.append(
-                "Unresolved validation findings remain on this invoice.",
+                "Open validation findings remain on this invoice.",
             )
         else:
             sentences.append(
-                "No unresolved validation findings remain.",
+                "No open validation findings remain.",
             )
 
         if vendor_clarifications:
             sentences.append(
-                "Vendor clarification is required before final approval.",
-            )
-        else:
-            sentences.append(
-                "No vendor clarification is required.",
+                "Vendor clarification may be required.",
             )
 
         return " ".join(
