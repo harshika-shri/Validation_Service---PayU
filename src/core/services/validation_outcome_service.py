@@ -2,19 +2,17 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from src.control.agents.duplicate_detection.duplicate_detection import (
+from src.constants.validation_issue_codes import (
     DUPLICATE_INVOICE_NUMBER,
     POTENTIAL_DUPLICATE_INVOICE,
 )
-from src.control.agents.line_item_validation.line_item_validation import (
+from src.control.validation_flow import (
     AMBIGUOUS_LINE_MATCH,
     MISSING_PO_COVERAGE,
-    UNMATCHED_LINE_ITEM,
-)
-from src.control.validation_flow import (
     PO_AMBIGUOUS,
     PO_RESOLUTION_BLOCKED,
     PO_UNRESOLVED,
+    UNMATCHED_LINE_ITEM,
 )
 from src.data.models.postgres.enums import (
     InvoiceValidationOutcome,
