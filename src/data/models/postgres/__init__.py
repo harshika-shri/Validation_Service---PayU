@@ -6,6 +6,7 @@ from .dispute_communications import DisputeCommunication
 from .disputes import Dispute
 from .extraction_field_confidence import ExtractionFieldConfidence
 from .gmail_monitoring_state import GmailMonitoringState
+from .invoice_email import InvoiceEmail
 from .invoice_extracted_vendor import InvoiceExtractedVendor
 from .invoice_line_allocation_candidates import (
     InvoiceLineAllocationCandidateGroup,
