@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from src.constants.validation_issue_codes import (
+    DUPLICATE_INVOICE_NUMBER,
+    POTENTIAL_DUPLICATE_INVOICE,
+)
 from src.control.agents.invoice_header_resolution.invoice_number_utils import (
     is_generated_invoice_number,
 )
@@ -17,6 +21,9 @@ from src.control.agents.po_resolution.po_line_matcher import (
 from src.control.validation_flow import (
     preserve_flow_outcome_state,
     should_continue_validation,
+)
+from src.core.services.validation_outcome_service import (
+    ValidationOutcomeService,
 )
 from src.data.models.postgres.enums import (
     IssueType,
@@ -39,15 +46,12 @@ from src.data.repositories.po_resolution.po_line_item_repository import (
 from src.data.repositories.po_resolution.po_line_quantity_repository import (
     POLineQuantityRepository,
 )
-from src.data.repositories.vendor_resolution.invoice_extracted_vendor_repository import (
-    InvoiceExtractedVendorRepository,
-)
-from src.core.services.validation_outcome_service import (
-    ValidationOutcomeService,
-)
 from src.data.repositories.shared.validation_issue_repository import (
     ValidationIssueCreate,
     ValidationIssueRepository,
+)
+from src.data.repositories.vendor_resolution.invoice_extracted_vendor_repository import (
+    InvoiceExtractedVendorRepository,
 )
 from src.utils.duplicate_detection_utils import (
     InvoiceBusinessContent,
@@ -57,9 +61,6 @@ from src.utils.duplicate_detection_utils import (
 logger = logging.getLogger(__name__)
 
 CHECK_STAGE = "duplicate_detection"
-
-DUPLICATE_INVOICE_NUMBER = "DUPLICATE_INVOICE_NUMBER"
-POTENTIAL_DUPLICATE_INVOICE = "POTENTIAL_DUPLICATE_INVOICE"
 
 
 @dataclass(frozen=True, slots=True)
