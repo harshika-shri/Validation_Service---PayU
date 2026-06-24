@@ -96,8 +96,8 @@ class InvoiceLineAllocationCandidateItem(Base, CreatedAtMixin):
         nullable=False,
     )
 
-    allocation_candidate_group: Mapped[
-        InvoiceLineAllocationCandidateGroup
-    ] = relationship(
-        back_populates="items",
+    allocation_candidate_group: Mapped[InvoiceLineAllocationCandidateGroup] = (
+        relationship(
+            back_populates="items",
+        )
     )
