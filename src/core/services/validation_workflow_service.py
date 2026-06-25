@@ -44,24 +44,27 @@ from src.core.services.validation_outcome_service import (
 from src.core.services.validation_state_mapper import (
     validation_state_to_schema,
 )
+from src.core.services.validation_workflow_outcome_service import (
+    ValidationWorkflowOutcomeService,
+)
 from src.data.models.postgres.enums import ValidationFlowOutcome
+from src.data.repositories.amount_validation.invoice_amount_repository import (
+    InvoiceAmountRepository,
+)
+from src.data.repositories.amount_validation.invoice_line_amount_repository import (
+    InvoiceLineAmountRepository,
+)
 from src.data.repositories.company_resolution.company_repository import (
     CompanyRepository,
 )
 from src.data.repositories.duplicate_detection.duplicate_detection_repository import (
     DuplicateDetectionRepository,
 )
-from src.data.repositories.amount_validation.invoice_amount_repository import (
-    InvoiceAmountRepository,
-)
 from src.data.repositories.invoice_header_resolution.invoice_email_repository import (
     InvoiceEmailRepository,
 )
-from src.data.repositories.vendor_resolution.invoice_extracted_vendor_repository import (
-    InvoiceExtractedVendorRepository,
-)
-from src.data.repositories.amount_validation.invoice_line_amount_repository import (
-    InvoiceLineAmountRepository,
+from src.data.repositories.invoice_header_resolution.invoice_repository import (
+    InvoiceRepository,
 )
 from src.data.repositories.line_item_validation.invoice_line_item_repository import (
     InvoiceLineItemRepository,
@@ -78,12 +81,6 @@ from src.data.repositories.po_resolution.invoice_po_resolution_group_repository 
 from src.data.repositories.po_resolution.invoice_po_resolution_repository import (
     InvoicePOResolutionRepository,
 )
-from src.data.repositories.invoice_header_resolution.invoice_repository import (
-    InvoiceRepository,
-)
-from src.data.repositories.review_summary_generation.invoice_review_summary_repository import (
-    InvoiceReviewSummaryRepository,
-)
 from src.data.repositories.po_resolution.po_line_item_repository import (
     POLineItemRepository,
 )
@@ -93,8 +90,14 @@ from src.data.repositories.po_resolution.po_line_quantity_repository import (
 from src.data.repositories.po_resolution.purchase_order_repository import (
     PurchaseOrderRepository,
 )
+from src.data.repositories.review_summary_generation.invoice_review_summary_repository import (
+    InvoiceReviewSummaryRepository,
+)
 from src.data.repositories.shared.validation_issue_repository import (
     ValidationIssueRepository,
+)
+from src.data.repositories.vendor_resolution.invoice_extracted_vendor_repository import (
+    InvoiceExtractedVendorRepository,
 )
 from src.data.repositories.vendor_resolution.vendor_repository import (
     VendorRepository,
@@ -133,11 +136,22 @@ class ValidationWorkflowService:
             initial_state,
         )
 
-        return validation_state_to_schema(
+        schema = validation_state_to_schema(
             dict(
                 final_state,
             ),
         )
+
+        if schema.decision is not None:
+            workflow_outcome_service = ValidationWorkflowOutcomeService(
+                self._session,
+            )
+            await workflow_outcome_service.finalize_and_publish(
+                invoice_id=invoice_id,
+                decision=schema.decision,
+            )
+
+        return schema
 
     def _build_agents(
         self,

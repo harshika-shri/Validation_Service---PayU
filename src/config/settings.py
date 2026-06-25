@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from pydantic import Field, model_validator
+from pydantic import Field, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -46,6 +46,26 @@ class Settings(BaseSettings):
         validation_alias="GROQ_LLM_MAX_TOKENS",
     )
 
+    REDIS_HOST: str = Field(default="redis", validation_alias="REDIS_HOST")
+    REDIS_PORT: int = Field(default=6379, validation_alias="REDIS_PORT")
+    REDIS_DB: int = Field(default=0, validation_alias="REDIS_DB")
+    EXTRACTION_EVENTS_STREAM: str = Field(
+        default="extraction.events",
+        validation_alias="EXTRACTION_EVENTS_STREAM",
+    )
+    REDIS_STREAM_BLOCK_MS: int = Field(
+        default=5000,
+        validation_alias="REDIS_STREAM_BLOCK_MS",
+    )
+    VALIDATION_EVENTS_STREAM: str = Field(
+        default="validation-events",
+        validation_alias="VALIDATION_EVENTS_STREAM",
+    )
+
+    CELERY_TASK_DEFAULT_QUEUE: str = "default"
+    CELERY_TASK_MAX_RETRIES: int = 3
+    CELERY_TASK_RETRY_BACKOFF_SECONDS: int = 60
+
     PO_DATE_WINDOW_DAYS: int = Field(
         default=365,
         validation_alias="PO_DATE_WINDOW_DAYS",
@@ -60,6 +80,19 @@ class Settings(BaseSettings):
         default=Decimal("0.05"),
         validation_alias="AMOUNT_ROUNDING_TOLERANCE",
     )
+
+    @computed_field
+    @property
+    def CELERY_BROKER_URL(self) -> str:
+        return (
+            f"redis://{self.REDIS_HOST}:"
+            f"{self.REDIS_PORT}/{self.REDIS_DB}"
+        )
+
+    @computed_field
+    @property
+    def CELERY_RESULT_BACKEND(self) -> str:
+        return self.CELERY_BROKER_URL
 
     @model_validator(mode="after")
     def build_database_url(self) -> "Settings":

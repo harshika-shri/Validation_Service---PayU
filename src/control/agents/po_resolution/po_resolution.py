@@ -24,9 +24,6 @@ from src.data.models.postgres.enums import (
     PurchaseOrderStatus,
     ValidationIssueStatus,
 )
-from src.data.repositories.vendor_resolution.invoice_extracted_vendor_repository import (
-    InvoiceExtractedVendorRepository,
-)
 from src.data.repositories.line_item_validation.invoice_line_item_repository import (
     InvoiceLineItemRecord,
     InvoiceLineItemRepository,
@@ -52,6 +49,9 @@ from src.data.repositories.po_resolution.purchase_order_repository import (
 from src.data.repositories.shared.validation_issue_repository import (
     ValidationIssueCreate,
     ValidationIssueRepository,
+)
+from src.data.repositories.vendor_resolution.invoice_extracted_vendor_repository import (
+    InvoiceExtractedVendorRepository,
 )
 from src.utils.po_candidate_description import (
     append_po_context,

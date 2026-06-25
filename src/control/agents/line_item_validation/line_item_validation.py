@@ -26,6 +26,10 @@ from src.data.models.postgres.enums import (
     POResolutionCandidateType,
     ValidationIssueStatus,
 )
+from src.data.repositories.line_item_validation.invoice_line_item_repository import (
+    InvoiceLineItemRecord,
+    InvoiceLineItemRepository,
+)
 from src.data.repositories.po_resolution.invoice_line_allocation_candidate_repository import (
     AllocationCandidateGroupCreate,
     AllocationCandidateItemCreate,
@@ -33,13 +37,6 @@ from src.data.repositories.po_resolution.invoice_line_allocation_candidate_repos
 )
 from src.data.repositories.po_resolution.invoice_po_resolution_group_repository import (
     InvoicePOResolutionGroupRepository,
-)
-from src.data.repositories.line_item_validation.invoice_line_item_repository import (
-    InvoiceLineItemRecord,
-    InvoiceLineItemRepository,
-)
-from src.data.repositories.vendor_resolution.invoice_extracted_vendor_repository import (
-    InvoiceExtractedVendorRepository,
 )
 from src.data.repositories.po_resolution.po_line_item_repository import (
     POLineItemRecord,
@@ -56,13 +53,16 @@ from src.data.repositories.shared.validation_issue_repository import (
     ValidationIssueCreate,
     ValidationIssueRepository,
 )
-from src.utils.po_line_matching_utils import (
-    normalize_item_code,
-    normalize_item_description,
+from src.data.repositories.vendor_resolution.invoice_extracted_vendor_repository import (
+    InvoiceExtractedVendorRepository,
 )
 from src.utils.po_candidate_description import (
     build_po_issue_context,
     enrich_pending_issues_with_po_context,
+)
+from src.utils.po_line_matching_utils import (
+    normalize_item_code,
+    normalize_item_description,
 )
 
 logger = logging.getLogger(__name__)
