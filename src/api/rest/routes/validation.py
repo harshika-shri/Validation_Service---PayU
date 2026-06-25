@@ -1,13 +1,13 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, status
 
-from src.api.rest.dependencies import get_db_session
-from src.core.services.validation_workflow_service import (
-    ValidationWorkflowService,
+from src.schemas.validation_task_schema import (
+    ValidationTaskAcceptedResponse,
 )
-from src.schemas.validation_state_schema import ValidationStateSchema
+from src.tasks.validation_tasks import (
+    validate_invoice,
+)
 
 router = APIRouter(
     prefix="/api/v1",
@@ -17,39 +17,41 @@ router = APIRouter(
 
 @router.post(
     "/validation/run/{invoice_id}",
-    status_code=status.HTTP_200_OK,
-    response_model=ValidationStateSchema,
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=ValidationTaskAcceptedResponse,
 )
 async def run_invoice_validation(
     invoice_id: UUID,
-    db: AsyncSession = Depends(
-        get_db_session,
-    ),
-) -> ValidationStateSchema:
-    service = ValidationWorkflowService(
-        session=db,
+) -> ValidationTaskAcceptedResponse:
+    task = validate_invoice.delay(
+        invoice_id=str(
+            invoice_id,
+        ),
     )
 
-    return await service.run_invoice_validation(
+    return ValidationTaskAcceptedResponse(
+        task_id=task.id,
         invoice_id=invoice_id,
+        status="queued",
     )
 
 
 @router.post(
     "/validate/{invoice_id}",
-    status_code=status.HTTP_200_OK,
-    response_model=ValidationStateSchema,
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=ValidationTaskAcceptedResponse,
 )
-async def validate_invoice(
+async def validate_invoice_route(
     invoice_id: UUID,
-    db: AsyncSession = Depends(
-        get_db_session,
-    ),
-) -> ValidationStateSchema:
-    service = ValidationWorkflowService(
-        session=db,
+) -> ValidationTaskAcceptedResponse:
+    task = validate_invoice.delay(
+        invoice_id=str(
+            invoice_id,
+        ),
     )
 
-    return await service.run_invoice_validation(
+    return ValidationTaskAcceptedResponse(
+        task_id=task.id,
         invoice_id=invoice_id,
+        status="queued",
     )
