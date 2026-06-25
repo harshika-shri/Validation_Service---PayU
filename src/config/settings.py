@@ -49,16 +49,16 @@ class Settings(BaseSettings):
     REDIS_HOST: str = Field(default="redis", validation_alias="REDIS_HOST")
     REDIS_PORT: int = Field(default=6379, validation_alias="REDIS_PORT")
     REDIS_DB: int = Field(default=0, validation_alias="REDIS_DB")
-    EXTRACTION_EVENTS_STREAM: str = Field(
+    REDIS_STREAM_NAME: str = Field(
         default="extraction.events",
-        validation_alias="EXTRACTION_EVENTS_STREAM",
+        validation_alias="REDIS_STREAM_NAME",
     )
     REDIS_STREAM_BLOCK_MS: int = Field(
         default=5000,
         validation_alias="REDIS_STREAM_BLOCK_MS",
     )
     VALIDATION_EVENTS_STREAM: str = Field(
-        default="validation-events",
+        default="validation.events",
         validation_alias="VALIDATION_EVENTS_STREAM",
     )
 
