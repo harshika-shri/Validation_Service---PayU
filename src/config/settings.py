@@ -57,12 +57,20 @@ class Settings(BaseSettings):
         default=5000,
         validation_alias="REDIS_STREAM_BLOCK_MS",
     )
+    REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS: float = Field(
+        default=5.0,
+        validation_alias="REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS",
+    )
+    REDIS_SOCKET_TIMEOUT_BUFFER_SECONDS: float = Field(
+        default=5.0,
+        validation_alias="REDIS_SOCKET_TIMEOUT_BUFFER_SECONDS",
+    )
     VALIDATION_EVENTS_STREAM: str = Field(
         default="validation.events",
         validation_alias="VALIDATION_EVENTS_STREAM",
     )
 
-    CELERY_TASK_DEFAULT_QUEUE: str = "default"
+    CELERY_TASK_DEFAULT_QUEUE: str = "validation"
     CELERY_TASK_MAX_RETRIES: int = 3
     CELERY_TASK_RETRY_BACKOFF_SECONDS: int = 60
 
@@ -80,6 +88,13 @@ class Settings(BaseSettings):
         default=Decimal("0.05"),
         validation_alias="AMOUNT_ROUNDING_TOLERANCE",
     )
+
+    @computed_field
+    @property
+    def REDIS_SOCKET_TIMEOUT_SECONDS(self) -> float:
+        block_seconds = self.REDIS_STREAM_BLOCK_MS / 1000.0
+
+        return block_seconds + self.REDIS_SOCKET_TIMEOUT_BUFFER_SECONDS
 
     @computed_field
     @property

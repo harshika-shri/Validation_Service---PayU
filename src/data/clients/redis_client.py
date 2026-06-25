@@ -20,12 +20,17 @@ def get_redis_client() -> Redis:
             port=settings.REDIS_PORT,
             db=settings.REDIS_DB,
             decode_responses=True,
+            socket_connect_timeout=settings.REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS,
+            socket_timeout=settings.REDIS_SOCKET_TIMEOUT_SECONDS,
         )
         logger.info(
-            "Redis client initialized host=%s port=%s db=%s",
+            "Redis client initialized host=%s port=%s db=%s "
+            "socket_timeout=%ss block_ms=%s",
             settings.REDIS_HOST,
             settings.REDIS_PORT,
             settings.REDIS_DB,
+            settings.REDIS_SOCKET_TIMEOUT_SECONDS,
+            settings.REDIS_STREAM_BLOCK_MS,
         )
 
     return _redis_client
