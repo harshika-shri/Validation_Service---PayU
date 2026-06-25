@@ -4,9 +4,6 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.services.validation_event_publisher_service import (
-    ValidationEventPublisherService,
-)
 from src.core.workflow.validation_event_mapping import (
     ValidationWorkflowEvent,
     map_decision_to_workflow_event,
@@ -16,6 +13,9 @@ from src.data.models.postgres.enums import (
 )
 from src.data.repositories.invoice_header_resolution.invoice_repository import (
     InvoiceRepository,
+)
+from src.messaging.redis_stream_publisher import (
+    queue_validation_event,
 )
 
 
@@ -28,7 +28,6 @@ class ValidationWorkflowOutcomeService:
         self.invoice_repo = InvoiceRepository(
             session,
         )
-        self.event_publisher = ValidationEventPublisherService()
 
     async def finalize_and_publish(
         self,
@@ -44,10 +43,10 @@ class ValidationWorkflowOutcomeService:
             invoice_id=invoice_id,
             validation_outcome=workflow_event.validation_outcome,
         )
-        await self._session.commit()
-        await self.event_publisher.publish_validation_event(
+
+        queue_validation_event(
             invoice_id=invoice_id,
-            workflow_event=workflow_event,
+            event_type=workflow_event.event_type,
         )
 
         return workflow_event

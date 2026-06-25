@@ -9,6 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.data.clients.postgres_client import (
     get_session_factory,
 )
+from src.messaging.post_commit import (
+    discard_pending_validation_events,
+    publish_committed_validation_events,
+)
 
 T = TypeVar("T")
 
@@ -27,10 +31,12 @@ async def run_with_db_session(
                 session,
             )
             await session.commit()
+            publish_committed_validation_events()
 
             return result
         except Exception:
             await session.rollback()
+            discard_pending_validation_events()
             raise
 
 
