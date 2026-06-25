@@ -14,18 +14,18 @@ from src.data.models.postgres.enums import (
     InvoiceValidationOutcome,
     ValidationIssueStatus,
 )
+from src.data.repositories.invoice_header_resolution.invoice_repository import (
+    InvoiceRepository,
+)
 from src.data.repositories.po_resolution.invoice_po_resolution_group_repository import (
     InvoicePOResolutionGroupRepository,
 )
-from src.data.repositories.invoice_header_resolution.invoice_repository import (
-    InvoiceRepository,
+from src.data.repositories.po_resolution.purchase_order_repository import (
+    PurchaseOrderRepository,
 )
 from src.data.repositories.review_summary_generation.invoice_review_summary_repository import (
     InvoiceReviewSummaryRepository,
     ReviewSummaryUpsert,
-)
-from src.data.repositories.po_resolution.purchase_order_repository import (
-    PurchaseOrderRepository,
 )
 from src.data.repositories.shared.validation_issue_repository import (
     InvoiceIssueDetailRecord,

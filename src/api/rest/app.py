@@ -8,7 +8,12 @@ from src.api.rest.middleware.cors import add_cors_middleware
 from src.api.rest.middleware.error_handler import add_error_handlers
 from src.api.rest.routes.health import router as health_router
 from src.api.rest.routes.validation import router as validation_router
+from src.consumers.extraction_stream_consumer import (
+    ExtractionStreamConsumer,
+)
 from src.data.clients.postgres_client import get_or_create_engine
+
+_extraction_stream_consumer = ExtractionStreamConsumer()
 
 
 @asynccontextmanager
@@ -26,9 +31,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         print("Database connection failed")
         print(e)
 
+    await _extraction_stream_consumer.start()
+
     yield
 
     # Shutdown
+    await _extraction_stream_consumer.stop()
     await engine.dispose()
 
     print("Database connections closed")

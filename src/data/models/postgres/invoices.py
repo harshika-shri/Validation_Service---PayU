@@ -150,6 +150,11 @@ class Invoice(Base, TimestampMixin):
         nullable=True,
     )
 
+    assigned_manager_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=True,
+    )
+
     escalated_to: Mapped[UUID | None] = mapped_column(
         ForeignKey("users.id"),
         nullable=True,

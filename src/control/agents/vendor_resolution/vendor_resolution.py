@@ -12,13 +12,13 @@ from src.data.models.postgres.enums import (
     ValidationIssueStatus,
     VendorStatus,
 )
-from src.data.repositories.vendor_resolution.invoice_extracted_vendor_repository import (
-    ExtractedVendorRecord,
-    InvoiceExtractedVendorRepository,
-)
 from src.data.repositories.shared.validation_issue_repository import (
     ValidationIssueCreate,
     ValidationIssueRepository,
+)
+from src.data.repositories.vendor_resolution.invoice_extracted_vendor_repository import (
+    ExtractedVendorRecord,
+    InvoiceExtractedVendorRepository,
 )
 from src.data.repositories.vendor_resolution.vendor_repository import (
     VendorRecord,
