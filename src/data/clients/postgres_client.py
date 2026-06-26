@@ -23,6 +23,18 @@ else:
 _engine: AsyncEngine | None = None
 
 
+async def dispose_engine() -> None:
+    global _engine
+
+    if _engine is not None:
+        await _engine.dispose()
+
+
+def reset_engine() -> None:
+    global _engine
+    _engine = None
+
+
 def get_or_create_engine() -> AsyncEngine:
     global _engine
 

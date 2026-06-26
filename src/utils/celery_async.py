@@ -7,6 +7,7 @@ from typing import TypeVar
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.data.clients.postgres_client import (
+    dispose_engine,
     get_session_factory,
 )
 from src.messaging.post_commit import (
@@ -25,19 +26,22 @@ async def run_with_db_session(
 ) -> T:
     session_factory = get_session_factory()
 
-    async with session_factory() as session:
-        try:
-            result = await handler(
-                session,
-            )
-            await session.commit()
-            publish_committed_validation_events()
+    try:
+        async with session_factory() as session:
+            try:
+                result = await handler(
+                    session,
+                )
+                await session.commit()
+                publish_committed_validation_events()
 
-            return result
-        except Exception:
-            await session.rollback()
-            discard_pending_validation_events()
-            raise
+                return result
+            except Exception:
+                await session.rollback()
+                discard_pending_validation_events()
+                raise
+    finally:
+        await dispose_engine()
 
 
 def run_async_in_worker(
