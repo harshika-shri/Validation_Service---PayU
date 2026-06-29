@@ -9,11 +9,13 @@ from sqlalchemy import func, select, update
 from src.data.models.postgres.enums import (
     AllocationMatchType,
     AllocationStatus,
+    InvoiceStatus,
 )
 from src.data.models.postgres.invoice_line_items import InvoiceLineItem
 from src.data.models.postgres.invoice_line_po_allocations import (
     InvoiceLinePOAllocation,
 )
+from src.data.models.postgres.invoices import Invoice
 from src.data.models.postgres.po_line_items import POLineItem
 from src.data.repositories.base_repo import BaseRepository
 
@@ -305,13 +307,32 @@ class InvoiceLinePOAllocationRepository(BaseRepository):
             )
         )
 
-        if exclude_invoice_id is not None:
+        # PENDING allocations: exclude both the invoice being re-validated and
+        # any invoice that has already been REJECTED (rejected invoices must not
+        # consume PO remaining quantity).
+        # COMMITTED allocations only need the exclude_invoice_id guard.
+        needs_line_join = (
+            exclude_invoice_id is not None
+            or allocation_status == AllocationStatus.PENDING
+        )
+
+        if needs_line_join:
             stmt = stmt.join(
                 InvoiceLineItem,
                 InvoiceLineItem.id
                 == InvoiceLinePOAllocation.invoice_line_item_id,
+            )
+            if exclude_invoice_id is not None:
+                stmt = stmt.where(
+                    InvoiceLineItem.invoice_id != exclude_invoice_id,
+                )
+
+        if allocation_status == AllocationStatus.PENDING:
+            stmt = stmt.join(
+                Invoice,
+                Invoice.id == InvoiceLineItem.invoice_id,
             ).where(
-                InvoiceLineItem.invoice_id != exclude_invoice_id,
+                Invoice.invoice_status != InvoiceStatus.REJECTED,
             )
 
         result = await self.execute(
@@ -353,13 +374,31 @@ class InvoiceLinePOAllocationRepository(BaseRepository):
             )
         )
 
-        if exclude_invoice_id is not None:
+        # PENDING allocations: exclude both the re-validated invoice and any
+        # invoice that has already been REJECTED — same logic as
+        # _sum_allocated_quantity.
+        needs_line_join = (
+            exclude_invoice_id is not None
+            or allocation_status == AllocationStatus.PENDING
+        )
+
+        if needs_line_join:
             stmt = stmt.join(
                 InvoiceLineItem,
                 InvoiceLineItem.id
                 == InvoiceLinePOAllocation.invoice_line_item_id,
+            )
+            if exclude_invoice_id is not None:
+                stmt = stmt.where(
+                    InvoiceLineItem.invoice_id != exclude_invoice_id,
+                )
+
+        if allocation_status == AllocationStatus.PENDING:
+            stmt = stmt.join(
+                Invoice,
+                Invoice.id == InvoiceLineItem.invoice_id,
             ).where(
-                InvoiceLineItem.invoice_id != exclude_invoice_id,
+                Invoice.invoice_status != InvoiceStatus.REJECTED,
             )
 
         result = await self.execute(

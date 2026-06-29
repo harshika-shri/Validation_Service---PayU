@@ -6,11 +6,12 @@ from uuid import UUID
 
 from sqlalchemy import delete, func, select, update
 
-from src.data.models.postgres.enums import POResolutionCandidateType
+from src.data.models.postgres.enums import InvoiceStatus, POResolutionCandidateType
 from src.data.models.postgres.invoice_line_allocation_candidates import (
     InvoiceLineAllocationCandidateGroup,
     InvoiceLineAllocationCandidateItem,
 )
+from src.data.models.postgres.invoices import Invoice
 from src.data.models.postgres.po_line_items import POLineItem
 from src.data.repositories.base_repo import BaseRepository
 from src.data.repositories.po_resolution.invoice_line_po_allocation_repository import (
@@ -127,6 +128,9 @@ class InvoiceLineAllocationCandidateRepository(BaseRepository):
         if not po_line_item_ids:
             return {}
 
+        # InvoiceLineAllocationCandidateGroup already joined — also join Invoice
+        # so we can exclude candidates that belong to REJECTED invoices.
+        # Rejected invoices must not reserve PO quantity.
         stmt = (
             select(
                 InvoiceLineAllocationCandidateItem.po_line_item_id,
@@ -142,6 +146,10 @@ class InvoiceLineAllocationCandidateRepository(BaseRepository):
                 InvoiceLineAllocationCandidateGroup.id
                 == InvoiceLineAllocationCandidateItem.allocation_candidate_group_id,
             )
+            .join(
+                Invoice,
+                Invoice.id == InvoiceLineAllocationCandidateGroup.invoice_id,
+            )
             .where(
                 InvoiceLineAllocationCandidateItem.po_line_item_id.in_(
                     po_line_item_ids,
@@ -149,6 +157,7 @@ class InvoiceLineAllocationCandidateRepository(BaseRepository):
                 InvoiceLineAllocationCandidateGroup.candidate_type.in_(
                     _RESERVATION_CANDIDATE_TYPES,
                 ),
+                Invoice.invoice_status != InvoiceStatus.REJECTED,
             )
             .group_by(
                 InvoiceLineAllocationCandidateItem.po_line_item_id,
