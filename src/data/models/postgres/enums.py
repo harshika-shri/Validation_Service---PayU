@@ -92,9 +92,6 @@ class InvoiceValidationOutcome(str, Enum):
     AMBIGUOUS = "ambiguous"
     UNRESOLVED = "unresolved"
     DUPLICATE = "duplicate"
-    APPROVED = "approved"
-    PENDING_REVIEW = "pending_review"
-    REJECTED = "rejected"
 
 
 class AllocationMatchType(str, Enum):

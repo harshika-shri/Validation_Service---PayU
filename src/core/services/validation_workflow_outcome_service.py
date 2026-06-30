@@ -5,8 +5,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.workflow.validation_event_mapping import (
-    ValidationWorkflowEvent,
-    map_decision_to_workflow_event,
+    map_outcome_to_event_type,
 )
 from src.data.models.postgres.enums import (
     InvoiceValidationDecision,
@@ -34,19 +33,26 @@ class ValidationWorkflowOutcomeService:
         *,
         invoice_id: UUID,
         decision: InvoiceValidationDecision,
-    ) -> ValidationWorkflowEvent:
-        workflow_event = map_decision_to_workflow_event(
-            decision,
+    ) -> str:
+        _ = decision
+
+        validation_outcome = await self.invoice_repo.get_validation_outcome(
+            invoice_id,
         )
 
-        await self.invoice_repo.update_validation_outcome(
-            invoice_id=invoice_id,
-            validation_outcome=workflow_event.validation_outcome,
+        if validation_outcome is None:
+            raise ValueError(
+                f"Validation outcome is missing for invoice {invoice_id}.",
+            )
+
+        event_type = map_outcome_to_event_type(
+            validation_outcome,
         )
 
         queue_validation_event(
             invoice_id=invoice_id,
-            event_type=workflow_event.event_type,
+            event_type=event_type,
+            validation_outcome=validation_outcome.value,
         )
 
-        return workflow_event
+        return event_type

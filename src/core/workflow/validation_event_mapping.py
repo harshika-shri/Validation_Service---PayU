@@ -1,44 +1,27 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from src.constants.validation_event_constants import (
-    VALIDATION_EVENT_TYPE_COMPLETED,
-    VALIDATION_EVENT_TYPE_PENDING_REVIEW,
-    VALIDATION_EVENT_TYPE_REJECTED,
+    VALIDATION_EVENT_TYPE_AMBIGUOUS,
+    VALIDATION_EVENT_TYPE_DUPLICATE,
+    VALIDATION_EVENT_TYPE_RECOVERED,
+    VALIDATION_EVENT_TYPE_RESOLVED,
+    VALIDATION_EVENT_TYPE_UNRESOLVED,
 )
 from src.data.models.postgres.enums import (
-    InvoiceValidationDecision,
     InvoiceValidationOutcome,
 )
 
 
-@dataclass(frozen=True, slots=True)
-class ValidationWorkflowEvent:
-    event_type: str
-    validation_outcome: InvoiceValidationOutcome
+def map_outcome_to_event_type(
+    outcome: InvoiceValidationOutcome,
+) -> str:
+    return _OUTCOME_TO_EVENT_TYPE[outcome]
 
 
-_DECISION_TO_WORKFLOW_EVENT: dict[
-    InvoiceValidationDecision,
-    ValidationWorkflowEvent,
-] = {
-    InvoiceValidationDecision.APPROVED_AND_READY_TO_PAY: ValidationWorkflowEvent(
-        event_type=VALIDATION_EVENT_TYPE_COMPLETED,
-        validation_outcome=InvoiceValidationOutcome.APPROVED,
-    ),
-    InvoiceValidationDecision.PARTIAL_APPROVE: ValidationWorkflowEvent(
-        event_type=VALIDATION_EVENT_TYPE_PENDING_REVIEW,
-        validation_outcome=InvoiceValidationOutcome.PENDING_REVIEW,
-    ),
-    InvoiceValidationDecision.REJECT: ValidationWorkflowEvent(
-        event_type=VALIDATION_EVENT_TYPE_REJECTED,
-        validation_outcome=InvoiceValidationOutcome.REJECTED,
-    ),
+_OUTCOME_TO_EVENT_TYPE: dict[InvoiceValidationOutcome, str] = {
+    InvoiceValidationOutcome.RESOLVED: VALIDATION_EVENT_TYPE_RESOLVED,
+    InvoiceValidationOutcome.RECOVERED: VALIDATION_EVENT_TYPE_RECOVERED,
+    InvoiceValidationOutcome.AMBIGUOUS: VALIDATION_EVENT_TYPE_AMBIGUOUS,
+    InvoiceValidationOutcome.UNRESOLVED: VALIDATION_EVENT_TYPE_UNRESOLVED,
+    InvoiceValidationOutcome.DUPLICATE: VALIDATION_EVENT_TYPE_DUPLICATE,
 }
-
-
-def map_decision_to_workflow_event(
-    decision: InvoiceValidationDecision,
-) -> ValidationWorkflowEvent:
-    return _DECISION_TO_WORKFLOW_EVENT[decision]

@@ -25,6 +25,7 @@ logger = logging.getLogger(
 class PendingValidationEvent:
     invoice_id: UUID
     event_type: str
+    validation_outcome: str
 
 
 class RedisStreamPublisher:
@@ -51,6 +52,7 @@ class RedisStreamPublisher:
         invoice_id: UUID,
         event_type: str,
         *,
+        validation_outcome: str,
         occurred_at: datetime | None = None,
     ) -> str:
         timestamp = occurred_at or datetime.now(
@@ -64,6 +66,7 @@ class RedisStreamPublisher:
             "invoice_id": str(
                 invoice_id,
             ),
+            "validation_outcome": validation_outcome,
             "occurred_at": timestamp.isoformat(),
         }
 
@@ -131,11 +134,13 @@ def _get_pending_events() -> list[PendingValidationEvent]:
 def queue_validation_event(
     invoice_id: UUID,
     event_type: str,
+    validation_outcome: str,
 ) -> None:
     pending = _get_pending_events()
     event = PendingValidationEvent(
         invoice_id=invoice_id,
         event_type=event_type,
+        validation_outcome=validation_outcome,
     )
 
     if event not in pending:
@@ -169,6 +174,7 @@ def flush_validation_events() -> None:
             publisher.publish_validation_event(
                 event.invoice_id,
                 event.event_type,
+                validation_outcome=event.validation_outcome,
             )
         except Exception:
             logger.exception(
