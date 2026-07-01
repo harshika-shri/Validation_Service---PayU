@@ -81,18 +81,11 @@ class FinalDecisionAgent:
         )
 
         validation_outcome = (
-            await self._invoice_repo.get_validation_outcome(
-                invoice_id,
+            await self._validation_outcome_service.resolve_and_persist(
+                invoice_id=invoice_id,
+                issue_codes=issue_codes,
             )
         )
-
-        if validation_outcome is None:
-            validation_outcome = (
-                await self._validation_outcome_service.resolve_and_persist(
-                    invoice_id=invoice_id,
-                    issue_codes=issue_codes,
-                )
-            )
 
         decision = _OUTCOME_TO_DECISION[
             validation_outcome

@@ -128,40 +128,35 @@ def find_all_allocation_plans(
             )
 
             if available > 0:
-                take = min(
+                max_take = min(
                     available,
                     remaining,
                 )
-                consumed_copy[
-                    po_line_id
-                ] = used_on_line + take
-                allocation = AllocationRecord(
-                    invoice_line_item_id=invoice_line_id,
-                    po_id=po_line_to_po[
+                take = Decimal(1)
+
+                while take <= max_take:
+                    consumed_copy[
                         po_line_id
-                    ],
-                    po_line_item_id=po_line_id,
-                    allocated_quantity=take,
-                    match_type=edge.match_type,
-                )
-                backtrack(
-                    remaining - take,
-                    edge_idx,
-                    consumed_copy,
-                    [
-                        *line_allocations,
-                        allocation,
-                    ],
-                )
-                backtrack(
-                    remaining - take,
-                    edge_idx + 1,
-                    consumed_copy,
-                    [
-                        *line_allocations,
-                        allocation,
-                    ],
-                )
+                    ] = used_on_line + take
+                    allocation = AllocationRecord(
+                        invoice_line_item_id=invoice_line_id,
+                        po_id=po_line_to_po[
+                            po_line_id
+                        ],
+                        po_line_item_id=po_line_id,
+                        allocated_quantity=take,
+                        match_type=edge.match_type,
+                    )
+                    backtrack(
+                        remaining - take,
+                        edge_idx + 1,
+                        consumed_copy,
+                        [
+                            *line_allocations,
+                            allocation,
+                        ],
+                    )
+                    take += Decimal(1)
 
                 if used_on_line == 0:
                     consumed_copy.pop(

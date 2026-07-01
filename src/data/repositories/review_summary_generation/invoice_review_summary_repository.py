@@ -20,6 +20,7 @@ class ReviewSummaryRecord:
     system_recoveries: list[str]
     open_issues: list[str]
     vendor_clarifications: list[str]
+    validation_steps: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +30,7 @@ class ReviewSummaryUpsert:
     system_recoveries: list[str]
     open_issues: list[str]
     vendor_clarifications: list[str]
+    validation_steps: dict[str, str]
 
 
 class InvoiceReviewSummaryRepository(BaseRepository):
@@ -49,6 +51,7 @@ class InvoiceReviewSummaryRepository(BaseRepository):
                 system_recoveries_json=summary.system_recoveries,
                 open_issues_json=summary.open_issues,
                 vendor_clarifications_json=summary.vendor_clarifications,
+                validation_steps_json=summary.validation_steps,
             )
             self.session.add(
                 record,
@@ -75,6 +78,7 @@ class InvoiceReviewSummaryRepository(BaseRepository):
                 system_recoveries_json=summary.system_recoveries,
                 open_issues_json=summary.open_issues,
                 vendor_clarifications_json=summary.vendor_clarifications,
+                validation_steps_json=summary.validation_steps,
             )
             .returning(
                 InvoiceReviewSummary,
@@ -128,5 +132,8 @@ class InvoiceReviewSummaryRepository(BaseRepository):
             ),
             vendor_clarifications=list(
                 record.vendor_clarifications_json,
+            ),
+            validation_steps=dict(
+                record.validation_steps_json or {},
             ),
         )

@@ -162,6 +162,7 @@ def flush_validation_events() -> None:
         return
 
     publisher = get_redis_stream_publisher()
+    failed_events: list[PendingValidationEvent] = []
 
     for event in pending:
         logger.info(
@@ -184,7 +185,16 @@ def flush_validation_events() -> None:
                 event.event_type,
                 event.invoice_id,
             )
+            failed_events.append(
+                event,
+            )
 
     _pending_validation_events.set(
         [],
     )
+
+    if failed_events:
+        raise RuntimeError(
+            "Failed to publish validation events for invoices: "
+            f"{[event.invoice_id for event in failed_events]}",
+        )

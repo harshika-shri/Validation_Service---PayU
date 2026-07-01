@@ -314,7 +314,39 @@ VENDOR_CLARIFICATION_TOPICS: dict[str, str] = {
     "QUANTITY_EXCEEDS_ORDERED": "Confirm billed quantities.",
     "QUANTITY_EXCEEDS_REMAINING": "Confirm billed quantities.",
     "MISSING_PO_COVERAGE": "Confirm purchase order coverage for all line items.",
+    "PO_RECOVERED": "Confirm the correct purchase order reference.",
+    "UNMATCHED_LINE_ITEM": (
+        "Confirm how each invoiced line item maps to purchase order lines."
+    ),
+    "AMBIGUOUS_LINE_MATCH": (
+        "Contact the vendor to confirm how many units should be billed against "
+        "each purchase order, then select the matching allocation plan."
+    ),
+    "INVALID_ALLOCATION": (
+        "Confirm billed quantities and how they map to purchase order lines."
+    ),
+    "PO_AMBIGUOUS": "Confirm which purchase order applies to this invoice.",
+    "PO_UNRESOLVED": "Confirm the purchase order reference for this invoice.",
 }
+
+LINE_ITEM_MAPPING_ISSUE_CODES = frozenset(
+    {
+        "MISSING_PO_COVERAGE",
+        "UNMATCHED_LINE_ITEM",
+        "AMBIGUOUS_LINE_MATCH",
+        "QUANTITY_EXCEEDS_ORDERED",
+        "QUANTITY_EXCEEDS_REMAINING",
+        "INVALID_ALLOCATION",
+    },
+)
+
+PO_REFERENCE_RECOVERY_CODES = frozenset(
+    {
+        "PO_RECOVERED",
+        "PO_MISSING",
+        "INVALID_PO_REFERENCE",
+    },
+)
 
 
 def recovery_message_for_issue(
@@ -401,6 +433,166 @@ def clarification_topic_for_issue(
 ) -> str | None:
     return VENDOR_CLARIFICATION_TOPICS.get(
         issue_code,
+    )
+
+
+def _format_resolved_po_reference(
+    resolved_po_numbers: list[str],
+) -> str:
+    if not resolved_po_numbers:
+        return "candidate purchase order(s)"
+
+    if len(resolved_po_numbers) == 1:
+        return resolved_po_numbers[0]
+
+    return ", ".join(
+        resolved_po_numbers,
+    )
+
+
+def _line_mapping_issue_detail(
+    open_issue_codes: set[str],
+) -> str:
+    if "AMBIGUOUS_LINE_MATCH" in open_issue_codes:
+        return (
+            "multiple valid line-to-PO mappings were found and "
+            "the system cannot choose one automatically"
+        )
+
+    if "UNMATCHED_LINE_ITEM" in open_issue_codes:
+        return (
+            "the billed quantities or line details could not be "
+            "fully matched to available PO lines"
+        )
+
+    if "MISSING_PO_COVERAGE" in open_issue_codes:
+        return "one or more invoice lines lack matching PO line coverage"
+
+    if {
+        "QUANTITY_EXCEEDS_ORDERED",
+        "QUANTITY_EXCEEDS_REMAINING",
+        "INVALID_ALLOCATION",
+    } & open_issue_codes:
+        return (
+            "billed quantities do not align with the remaining "
+            "purchase order quantities"
+        )
+
+    return "line item mapping could not be confirmed"
+
+
+def build_open_issue_messages(
+    open_issue_codes: list[str],
+    resolved_po_numbers: list[str] | None = None,
+) -> list[str]:
+    codes = {
+        code
+        for code in open_issue_codes
+        if code
+    }
+    messages: list[str] = []
+    consumed: set[str] = set()
+    po_reference = _format_resolved_po_reference(
+        resolved_po_numbers or [],
+    )
+
+    if codes & PO_REFERENCE_RECOVERY_CODES and codes & LINE_ITEM_MAPPING_ISSUE_CODES:
+        messages.append(
+            "A purchase order candidate was recovered automatically "
+            f"({po_reference}), but invoice line items could not be "
+            f"mapped to PO lines because "
+            f"{_line_mapping_issue_detail(codes)}.",
+        )
+        consumed |= PO_REFERENCE_RECOVERY_CODES | LINE_ITEM_MAPPING_ISSUE_CODES
+    elif "AMBIGUOUS_LINE_MATCH" in codes:
+        messages.append(
+            "Multiple valid line-to-PO allocation plans were found. "
+            "Review the proposed mappings and confirm the correct plan."
+        )
+        consumed.add(
+            "AMBIGUOUS_LINE_MATCH",
+        )
+    elif "UNMATCHED_LINE_ITEM" in codes:
+        messages.append(
+            "Invoice line items could not be fully matched to purchase "
+            "order lines using the recovered PO candidate(s)."
+        )
+        consumed.add(
+            "UNMATCHED_LINE_ITEM",
+        )
+
+    for issue_code in open_issue_codes:
+        if issue_code in consumed:
+            continue
+
+        messages.append(
+            open_issue_message_for_issue(
+                issue_code,
+            ),
+        )
+
+    return deduplicate_messages(
+        messages,
+    )
+
+
+def build_vendor_clarification_messages(
+    open_issue_codes: list[str],
+    resolved_po_numbers: list[str] | None = None,
+) -> list[str]:
+    codes = {
+        code
+        for code in open_issue_codes
+        if code
+    }
+    messages: list[str] = []
+    consumed: set[str] = set()
+    po_reference = _format_resolved_po_reference(
+        resolved_po_numbers or [],
+    )
+
+    if codes & PO_REFERENCE_RECOVERY_CODES and codes & LINE_ITEM_MAPPING_ISSUE_CODES:
+        messages.append(
+            "Confirm the correct purchase order reference "
+            f"({po_reference}) and how each invoiced line item should "
+            f"map to PO lines, because "
+            f"{_line_mapping_issue_detail(codes)}."
+        )
+        consumed |= PO_REFERENCE_RECOVERY_CODES | LINE_ITEM_MAPPING_ISSUE_CODES
+    elif "AMBIGUOUS_LINE_MATCH" in codes:
+        messages.append(
+            "Confirm which purchase order line each invoiced item "
+            "should be billed against. Multiple valid mappings were found."
+        )
+        consumed.add(
+            "AMBIGUOUS_LINE_MATCH",
+        )
+    elif "UNMATCHED_LINE_ITEM" in codes:
+        messages.append(
+            "Confirm how each invoiced line item maps to purchase "
+            "order lines. The billed quantities could not be fully matched."
+        )
+        consumed.add(
+            "UNMATCHED_LINE_ITEM",
+        )
+
+    for issue_code in open_issue_codes:
+        if issue_code in consumed:
+            continue
+
+        topic = clarification_topic_for_issue(
+            issue_code,
+        )
+
+        if topic is None:
+            continue
+
+        messages.append(
+            topic,
+        )
+
+    return deduplicate_messages(
+        messages,
     )
 
 

@@ -27,6 +27,7 @@ async def run_invoice_validation(
         invoice_id=str(
             invoice_id,
         ),
+        force_fresh=True,
     )
 
     return ValidationTaskAcceptedResponse(
@@ -48,6 +49,7 @@ async def validate_invoice_route(
         invoice_id=str(
             invoice_id,
         ),
+        force_fresh=True,
     )
 
     return ValidationTaskAcceptedResponse(

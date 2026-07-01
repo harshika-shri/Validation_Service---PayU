@@ -20,7 +20,6 @@ from .invoice_po_resolution_groups import (
     InvoicePOResolutionGroupItem,
 )
 from .invoice_review_summaries import InvoiceReviewSummary
-from .invoice_self_checks import InvoiceSelfCheck
 from .invoice_validation_issues import InvoiceValidationIssue
 from .notifications import Notification
 from .invoices import Invoice

@@ -9,16 +9,24 @@ from uuid import UUID
 
 from src.control.agents.po_resolution.line_allocation_search import (
     AllocationRecord,
-    find_all_allocation_plans,
+    LineMatchEdge,
+    canonicalize_plan,
 )
 from src.control.agents.po_resolution.po_line_matcher import (
     POLineMatcher,
 )
 from src.control.validation_flow import (
+    LINE_ITEM_PARTIAL_AMOUNT_CODES,
     LINE_ITEM_VENDOR_CONFLICT,
     PO_MISSING,
     PO_UNRESOLVED,
+    VALIDATION_STEP_FAILED,
+    VALIDATION_STEP_PARTIAL,
+    VALIDATION_STEP_PASSED,
+    VALIDATION_STEP_SKIPPED,
+    VALIDATION_STEP_WARNING,
     build_validation_state,
+    merge_validation_steps,
     should_continue_validation,
 )
 from src.data.models.postgres.enums import (
@@ -34,6 +42,12 @@ from src.data.repositories.po_resolution.invoice_line_allocation_candidate_repos
     AllocationCandidateGroupCreate,
     AllocationCandidateItemCreate,
     InvoiceLineAllocationCandidateRepository,
+)
+from src.control.agents.line_item_validation.line_item_allocation_workflow import (
+    AllocationWorkflowState,
+    AllocationWorkflowStatus,
+    evaluate_allocation_workflow,
+    find_additional_po_ids,
 )
 from src.data.repositories.po_resolution.invoice_po_resolution_group_repository import (
     InvoicePOResolutionGroupRepository,
@@ -155,10 +169,12 @@ class LineItemValidationAgent:
                     "issue_codes": issue_codes,
                 },
             )
-            return build_validation_state(
+            return self._finish_line_item_validation(
                 invoice_id=invoice_id,
                 po_id=state.get("po_id"),
                 issue_codes=issue_codes,
+                state=state,
+                skipped=True,
             )
 
         resolved_po_ids = (
@@ -175,10 +191,12 @@ class LineItemValidationAgent:
                     "invoice_id": str(invoice_id),
                 },
             )
-            return build_validation_state(
+            return self._finish_line_item_validation(
                 invoice_id=invoice_id,
                 po_id=state.get("po_id"),
                 issue_codes=issue_codes,
+                state=state,
+                skipped=True,
             )
 
         invoice_lines = (
@@ -200,181 +218,59 @@ class LineItemValidationAgent:
                 pending_issues=pending_issues,
                 issue_codes=issue_codes,
             )
-            return build_validation_state(
+            return await self._finish_line_item_validation(
                 invoice_id=invoice_id,
                 po_id=state.get("po_id"),
                 issue_codes=issue_codes,
+                state=state,
             )
-
-        po_lines = await self._po_line_item_repo.get_by_po_ids(
-            resolved_po_ids,
-        )
-        resolved_purchase_orders = (
-            await self._purchase_order_repo.get_by_ids(
-                resolved_po_ids,
-            )
-        )
 
         matcher = POLineMatcher()
-        match_edges = await matcher.build_typed_match_edges(
+        workflow_state = await evaluate_allocation_workflow(
+            invoice_id=invoice_id,
             invoice_lines=invoice_lines,
-            po_lines=po_lines,
+            candidate_po_ids=resolved_po_ids,
+            po_line_item_repo=self._po_line_item_repo,
+            po_line_quantity_repo=self._po_line_quantity_repo,
+            purchase_order_repo=self._purchase_order_repo,
+            matcher=matcher,
         )
 
-        uncovered_lines = [
-            line
-            for line in invoice_lines
-            if not match_edges.get(
-                line.id,
-                [],
-            )
-        ]
-
-        if uncovered_lines:
-            for line in uncovered_lines:
-                pending_issues.append(
-                    PendingIssue(
-                        issue_code=MISSING_PO_COVERAGE,
-                        check_name="coverage_validation",
-                        field_name="item_description",
-                        issue_type=IssueType.MISSING,
-                        expected_value=None,
-                        actual_value=line.item_description,
-                        description=(
-                            "Invoice line has no matching PO line "
-                            "coverage in resolved purchase orders."
-                        ),
-                    ),
-                )
-
-            pending_issues = self._attach_resolved_po_context(
-                pending_issues=pending_issues,
-                purchase_orders=resolved_purchase_orders,
-                po_lines=po_lines,
-            )
-            issue_codes = await self._persist_issues(
-                invoice_id=invoice_id,
-                pending_issues=pending_issues,
-                issue_codes=issue_codes,
-            )
-            return build_validation_state(
-                invoice_id=invoice_id,
-                po_id=None,
-                issue_codes=issue_codes,
-            )
-
-        quantity_ordered_by_id = {
-            po_line.id: po_line.quantity_ordered
-            for po_line in po_lines
-        }
-        po_line_capacity = (
-            await self._po_line_quantity_repo.get_available_quantities(
-                po_line_ids=[
-                    po_line.id
-                    for po_line in po_lines
-                ],
-                quantity_ordered_by_id=quantity_ordered_by_id,
-                exclude_invoice_id=invoice_id,
-            )
-        )
-        po_line_to_po = {
-            po_line.id: po_line.po_id
-            for po_line in po_lines
-        }
-        po_line_by_id = {
-            po_line.id: po_line
-            for po_line in po_lines
-        }
-
-        allocation_plans = find_all_allocation_plans(
-            invoice_line_ids=[
-                line.id
-                for line in invoice_lines
-            ],
-            quantity_by_line={
-                line.id: line.quantity_billed
-                for line in invoice_lines
-            },
-            match_edges=match_edges,
-            po_line_capacity=po_line_capacity,
-            po_line_to_po=po_line_to_po,
+        workflow_state = await self._maybe_expand_candidate_pos_once(
+            invoice_id=invoice_id,
+            invoice_lines=invoice_lines,
+            workflow_state=workflow_state,
+            matcher=matcher,
         )
 
-        if not allocation_plans:
-            pending_issues.append(
-                PendingIssue(
-                    issue_code=UNMATCHED_LINE_ITEM,
-                    check_name="allocation_search",
-                    field_name="invoice_line_item_id",
-                    issue_type=IssueType.MISSING,
-                    expected_value=None,
-                    actual_value=None,
-                    description=(
-                        "No valid allocation plan could be generated "
-                        "for invoice line items."
-                    ),
-                ),
-            )
-            pending_issues = self._attach_resolved_po_context(
-                pending_issues=pending_issues,
-                purchase_orders=resolved_purchase_orders,
-                po_lines=po_lines,
-                available_quantity_by_line_id=po_line_capacity,
-            )
-            issue_codes = await self._persist_issues(
+        if (
+            workflow_state.status
+            == AllocationWorkflowStatus.AMBIGUOUS
+        ):
+            return await self._handle_ambiguous_allocation(
                 invoice_id=invoice_id,
+                issue_codes=issue_codes,
+                state=state,
                 pending_issues=pending_issues,
-                issue_codes=issue_codes,
-            )
-            return build_validation_state(
-                invoice_id=invoice_id,
-                po_id=None,
-                issue_codes=issue_codes,
+                workflow_state=workflow_state,
             )
 
-        if len(allocation_plans) > 1:
-            pending_issues.append(
-                PendingIssue(
-                    issue_code=AMBIGUOUS_LINE_MATCH,
-                    check_name="allocation_search",
-                    field_name="invoice_line_item_id",
-                    issue_type=IssueType.AMBIGUOUS,
-                    expected_value=None,
-                    actual_value=None,
-                    description=(
-                        "Multiple valid allocation plans were found "
-                        "for invoice line items."
-                    ),
-                ),
-            )
-            pending_issues = self._attach_resolved_po_context(
-                pending_issues=pending_issues,
-                purchase_orders=resolved_purchase_orders,
-                po_lines=po_lines,
-                available_quantity_by_line_id=po_line_capacity,
-                allocation_plans=allocation_plans,
-            )
-            issue_codes = await self._persist_issues(
+        if workflow_state.status in (
+            AllocationWorkflowStatus.UNRESOLVED,
+            AllocationWorkflowStatus.NEEDS_ADDITIONAL_POS,
+        ):
+            return await self._handle_unresolved_allocation(
                 invoice_id=invoice_id,
-                pending_issues=pending_issues,
                 issue_codes=issue_codes,
-            )
-            await self._persist_allocation_candidates(
-                invoice_id=invoice_id,
-                plans=list(
-                    allocation_plans,
-                ),
-                invoice_lines=invoice_lines,
-                candidate_type=POResolutionCandidateType.AMBIGUOUS,
-            )
-            return build_validation_state(
-                invoice_id=invoice_id,
-                po_id=None,
-                issue_codes=issue_codes,
+                state=state,
+                pending_issues=pending_issues,
+                workflow_state=workflow_state,
             )
 
         resolved_plan = next(
-            iter(allocation_plans),
+            iter(
+                workflow_state.allocation_plans,
+            ),
         )
 
         quantity_by_line = {
@@ -385,8 +281,8 @@ class LineItemValidationAgent:
         pending_issues.extend(
             self._validate_quantities(
                 plan=resolved_plan,
-                po_line_by_id=po_line_by_id,
-                available_by_po_line=po_line_capacity,
+                po_line_by_id=workflow_state.po_line_by_id,
+                available_by_po_line=workflow_state.po_line_capacity,
             ),
         )
         pending_issues.extend(
@@ -407,19 +303,20 @@ class LineItemValidationAgent:
             )
             pending_issues = self._attach_resolved_po_context(
                 pending_issues=pending_issues,
-                purchase_orders=resolved_purchase_orders,
-                po_lines=po_lines,
-                available_quantity_by_line_id=po_line_capacity,
+                purchase_orders=workflow_state.purchase_orders,
+                po_lines=workflow_state.po_lines,
+                available_quantity_by_line_id=workflow_state.po_line_capacity,
             )
             issue_codes = await self._persist_issues(
                 invoice_id=invoice_id,
                 pending_issues=pending_issues,
                 issue_codes=issue_codes,
             )
-            return build_validation_state(
+            return await self._finish_line_item_validation(
                 invoice_id=invoice_id,
                 po_id=None,
                 issue_codes=issue_codes,
+                state=state,
             )
 
         open_issue_codes = set(
@@ -436,21 +333,47 @@ class LineItemValidationAgent:
         )
 
         if pending_issues or prior_blocking_issues:
+            resolution_groups = (
+                await self._resolution_group_repo.get_groups_for_invoice(
+                    invoice_id,
+                )
+            )
+            allocation_candidate_type = (
+                POResolutionCandidateType.RECOVERED
+                if workflow_state.expanded_candidate_set
+                else (
+                    resolution_groups[0].candidate_type
+                    if len(resolution_groups) == 1
+                    else POResolutionCandidateType.AMBIGUOUS
+                )
+            )
+            await self._persist_allocation_candidates(
+                invoice_id=invoice_id,
+                plans=[resolved_plan],
+                invoice_lines=invoice_lines,
+                candidate_type=allocation_candidate_type,
+                resolution_group_id=(
+                    resolution_groups[0].id
+                    if len(resolution_groups) == 1
+                    else None
+                ),
+            )
             pending_issues = self._attach_resolved_po_context(
                 pending_issues=pending_issues,
-                purchase_orders=resolved_purchase_orders,
-                po_lines=po_lines,
-                available_quantity_by_line_id=po_line_capacity,
+                purchase_orders=workflow_state.purchase_orders,
+                po_lines=workflow_state.po_lines,
+                available_quantity_by_line_id=workflow_state.po_line_capacity,
             )
             issue_codes = await self._persist_issues(
                 invoice_id=invoice_id,
                 pending_issues=pending_issues,
                 issue_codes=issue_codes,
             )
-            return build_validation_state(
+            return await self._finish_line_item_validation(
                 invoice_id=invoice_id,
                 po_id=None,
                 issue_codes=issue_codes,
+                state=state,
             )
 
         resolution_groups = (
@@ -464,9 +387,13 @@ class LineItemValidationAgent:
             else None
         )
         allocation_candidate_type = (
-            resolution_groups[0].candidate_type
-            if len(resolution_groups) == 1
-            else POResolutionCandidateType.RESOLVED
+            POResolutionCandidateType.RECOVERED
+            if workflow_state.expanded_candidate_set
+            else (
+                resolution_groups[0].candidate_type
+                if len(resolution_groups) == 1
+                else POResolutionCandidateType.RESOLVED
+            )
         )
 
         await self._persist_allocation_candidates(
@@ -488,14 +415,291 @@ class LineItemValidationAgent:
             extra={
                 "invoice_id": str(invoice_id),
                 "validated_allocation_count": len(resolved_plan),
+                "expanded_candidate_set": workflow_state.expanded_candidate_set,
                 "issue_codes": issue_codes,
             },
         )
 
-        return build_validation_state(
+        return await self._finish_line_item_validation(
             invoice_id=invoice_id,
             po_id=state.get("po_id"),
             issue_codes=issue_codes,
+            state=state,
+        )
+
+    async def _maybe_expand_candidate_pos_once(
+        self,
+        *,
+        invoice_id: UUID,
+        invoice_lines: list[InvoiceLineItemRecord],
+        workflow_state: AllocationWorkflowState,
+        matcher: POLineMatcher,
+    ) -> AllocationWorkflowState:
+        if (
+            workflow_state.status
+            != AllocationWorkflowStatus.NEEDS_ADDITIONAL_POS
+        ):
+            return workflow_state
+
+        extracted_vendor = (
+            await self._extracted_vendor_repo.get_by_invoice_id(
+                invoice_id,
+            )
+        )
+        vendor_master_id = (
+            extracted_vendor.vendor_master_id
+            if extracted_vendor is not None
+            else None
+        )
+
+        additional_po_ids = await find_additional_po_ids(
+            invoice_id=invoice_id,
+            invoice_lines=invoice_lines,
+            current_po_ids=set(
+                workflow_state.po_ids,
+            ),
+            uncovered_line_ids=workflow_state.uncovered_line_ids,
+            insufficient_quantity_line_ids=(
+                workflow_state.insufficient_quantity_line_ids
+            ),
+            vendor_master_id=vendor_master_id,
+            matcher=matcher,
+            po_line_item_repo=self._po_line_item_repo,
+            po_line_quantity_repo=self._po_line_quantity_repo,
+            purchase_order_repo=self._purchase_order_repo,
+        )
+
+        if not additional_po_ids:
+            logger.info(
+                "No additional PO candidates found during line item validation",
+                extra={
+                    "invoice_id": str(invoice_id),
+                    "current_po_ids": [
+                        str(po_id)
+                        for po_id in workflow_state.po_ids
+                    ],
+                },
+            )
+            return AllocationWorkflowState(
+                status=AllocationWorkflowStatus.UNRESOLVED,
+                po_ids=workflow_state.po_ids,
+                po_lines=workflow_state.po_lines,
+                purchase_orders=workflow_state.purchase_orders,
+                match_edges=workflow_state.match_edges,
+                po_line_capacity=workflow_state.po_line_capacity,
+                po_line_to_po=workflow_state.po_line_to_po,
+                po_line_by_id=workflow_state.po_line_by_id,
+                allocation_plans=workflow_state.allocation_plans,
+                uncovered_line_ids=workflow_state.uncovered_line_ids,
+                insufficient_quantity_line_ids=(
+                    workflow_state.insufficient_quantity_line_ids
+                ),
+                expanded_candidate_set=False,
+            )
+
+        expanded_po_ids = sorted(
+            set(
+                workflow_state.po_ids,
+            )
+            | set(
+                additional_po_ids,
+            ),
+            key=str,
+        )
+
+        await self._resolution_group_repo.update_single_group_po_ids(
+            invoice_id,
+            po_ids=expanded_po_ids,
+            candidate_type=POResolutionCandidateType.RECOVERED,
+        )
+
+        logger.info(
+            "Expanded candidate PO set during line item validation",
+            extra={
+                "invoice_id": str(invoice_id),
+                "added_po_ids": [
+                    str(po_id)
+                    for po_id in additional_po_ids
+                ],
+                "expanded_po_ids": [
+                    str(po_id)
+                    for po_id in expanded_po_ids
+                ],
+            },
+        )
+
+        expanded_state = await evaluate_allocation_workflow(
+            invoice_id=invoice_id,
+            invoice_lines=invoice_lines,
+            candidate_po_ids=expanded_po_ids,
+            po_line_item_repo=self._po_line_item_repo,
+            po_line_quantity_repo=self._po_line_quantity_repo,
+            purchase_order_repo=self._purchase_order_repo,
+            matcher=matcher,
+        )
+
+        return AllocationWorkflowState(
+            status=expanded_state.status,
+            po_ids=expanded_state.po_ids,
+            po_lines=expanded_state.po_lines,
+            purchase_orders=expanded_state.purchase_orders,
+            match_edges=expanded_state.match_edges,
+            po_line_capacity=expanded_state.po_line_capacity,
+            po_line_to_po=expanded_state.po_line_to_po,
+            po_line_by_id=expanded_state.po_line_by_id,
+            allocation_plans=expanded_state.allocation_plans,
+            uncovered_line_ids=expanded_state.uncovered_line_ids,
+            insufficient_quantity_line_ids=(
+                expanded_state.insufficient_quantity_line_ids
+            ),
+            expanded_candidate_set=True,
+        )
+
+    async def _handle_ambiguous_allocation(
+        self,
+        *,
+        invoice_id: UUID,
+        issue_codes: list[str],
+        state: dict[str, Any],
+        pending_issues: list[PendingIssue],
+        workflow_state: AllocationWorkflowState,
+    ) -> dict[str, Any]:
+        pending_issues.append(
+            PendingIssue(
+                issue_code=AMBIGUOUS_LINE_MATCH,
+                check_name="allocation_search",
+                field_name="invoice_line_item_id",
+                issue_type=IssueType.AMBIGUOUS,
+                expected_value=None,
+                actual_value=None,
+                description=(
+                    "Multiple valid allocation plans were found "
+                    "for invoice line items."
+                ),
+            ),
+        )
+        pending_issues = self._attach_resolved_po_context(
+            pending_issues=pending_issues,
+            purchase_orders=workflow_state.purchase_orders,
+            po_lines=workflow_state.po_lines,
+            available_quantity_by_line_id=workflow_state.po_line_capacity,
+            allocation_plans=workflow_state.allocation_plans,
+        )
+        issue_codes = await self._persist_issues(
+            invoice_id=invoice_id,
+            pending_issues=pending_issues,
+            issue_codes=issue_codes,
+        )
+        await self._persist_allocation_candidates(
+            invoice_id=invoice_id,
+            plans=list(
+                workflow_state.allocation_plans,
+            ),
+            invoice_lines=await self._invoice_line_item_repo.get_by_invoice_id(
+                invoice_id,
+            ),
+            candidate_type=POResolutionCandidateType.AMBIGUOUS,
+        )
+        return await self._finish_line_item_validation(
+            invoice_id=invoice_id,
+            po_id=None,
+            issue_codes=issue_codes,
+            state=state,
+        )
+
+    async def _handle_unresolved_allocation(
+        self,
+        *,
+        invoice_id: UUID,
+        issue_codes: list[str],
+        state: dict[str, Any],
+        pending_issues: list[PendingIssue],
+        workflow_state: AllocationWorkflowState,
+    ) -> dict[str, Any]:
+        invoice_lines = await self._invoice_line_item_repo.get_by_invoice_id(
+            invoice_id,
+        )
+
+        if workflow_state.uncovered_line_ids:
+            uncovered_by_id = {
+                line.id: line
+                for line in invoice_lines
+            }
+
+            for line_id in workflow_state.uncovered_line_ids:
+                line = uncovered_by_id.get(
+                    line_id,
+                )
+
+                if line is None:
+                    continue
+
+                pending_issues.append(
+                    PendingIssue(
+                        issue_code=MISSING_PO_COVERAGE,
+                        check_name="coverage_validation",
+                        field_name="item_description",
+                        issue_type=IssueType.MISSING,
+                        expected_value=None,
+                        actual_value=line.item_description,
+                        description=(
+                            "Invoice line has no matching PO line "
+                            "coverage in resolved purchase orders."
+                        ),
+                    ),
+                )
+        else:
+            pending_issues.append(
+                PendingIssue(
+                    issue_code=UNMATCHED_LINE_ITEM,
+                    check_name="allocation_search",
+                    field_name="invoice_line_item_id",
+                    issue_type=IssueType.MISSING,
+                    expected_value=None,
+                    actual_value=None,
+                    description=(
+                        "No valid allocation plan could be generated "
+                        "for invoice line items."
+                    ),
+                ),
+            )
+
+        proposal_plans = self._build_per_po_proposal_plans(
+            invoice_lines=invoice_lines,
+            match_edges=workflow_state.match_edges,
+            po_lines=workflow_state.po_lines,
+            po_line_capacity=workflow_state.po_line_capacity,
+            po_line_to_po=workflow_state.po_line_to_po,
+        )
+
+        if proposal_plans:
+            await self._persist_allocation_candidates(
+                invoice_id=invoice_id,
+                plans=proposal_plans,
+                invoice_lines=invoice_lines,
+                candidate_type=(
+                    POResolutionCandidateType.AMBIGUOUS
+                    if len(proposal_plans) > 1
+                    else POResolutionCandidateType.RECOVERED
+                ),
+            )
+
+        pending_issues = self._attach_resolved_po_context(
+            pending_issues=pending_issues,
+            purchase_orders=workflow_state.purchase_orders,
+            po_lines=workflow_state.po_lines,
+            available_quantity_by_line_id=workflow_state.po_line_capacity,
+        )
+        issue_codes = await self._persist_issues(
+            invoice_id=invoice_id,
+            pending_issues=pending_issues,
+            issue_codes=issue_codes,
+        )
+        return await self._finish_line_item_validation(
+            invoice_id=invoice_id,
+            po_id=None,
+            issue_codes=issue_codes,
+            state=state,
         )
 
     async def _validate_line_item_vendor_consistency(
@@ -555,6 +759,83 @@ class LineItemValidationAgent:
                 )
 
         return None
+
+    @staticmethod
+    def _build_per_po_proposal_plans(
+        invoice_lines: list[InvoiceLineItemRecord],
+        match_edges: dict[UUID, list[LineMatchEdge]],
+        po_lines: list[POLineItemRecord],
+        po_line_capacity: dict[UUID, Decimal],
+        po_line_to_po: dict[UUID, UUID],
+    ) -> list[tuple[AllocationRecord, ...]]:
+        po_lines_by_po: dict[UUID, list[POLineItemRecord]] = {}
+
+        for po_line in po_lines:
+            po_lines_by_po.setdefault(
+                po_line.po_id,
+                [],
+            ).append(
+                po_line,
+            )
+
+        proposal_plans: list[tuple[AllocationRecord, ...]] = []
+
+        for po_id, po_lines_for_po in po_lines_by_po.items():
+            po_line_ids = {
+                po_line.id
+                for po_line in po_lines_for_po
+            }
+            plan_records: list[AllocationRecord] = []
+            covers_all_lines = True
+
+            for invoice_line in invoice_lines:
+                matching_edges = [
+                    edge
+                    for edge in match_edges.get(
+                        invoice_line.id,
+                        [],
+                    )
+                    if edge.po_line_id in po_line_ids
+                ]
+
+                if not matching_edges:
+                    covers_all_lines = False
+                    break
+
+                edge = matching_edges[0]
+                available = po_line_capacity.get(
+                    edge.po_line_id,
+                    Decimal(0),
+                )
+                allocated_quantity = min(
+                    invoice_line.quantity_billed,
+                    available,
+                )
+
+                if allocated_quantity <= 0:
+                    covers_all_lines = False
+                    break
+
+                plan_records.append(
+                    AllocationRecord(
+                        invoice_line_item_id=invoice_line.id,
+                        po_id=po_id,
+                        po_line_item_id=edge.po_line_id,
+                        allocated_quantity=allocated_quantity,
+                        match_type=edge.match_type,
+                    ),
+                )
+
+            if covers_all_lines and plan_records:
+                proposal_plans.append(
+                    canonicalize_plan(
+                        tuple(
+                            plan_records,
+                        ),
+                    ),
+                )
+
+        return proposal_plans
 
     @staticmethod
     def _detect_duplicate_lines(
@@ -752,6 +1033,60 @@ class LineItemValidationAgent:
         return enrich_pending_issues_with_po_context(
             pending_issues,
             context,
+        )
+
+    async def _finish_line_item_validation(
+        self,
+        *,
+        invoice_id: UUID,
+        po_id: object,
+        issue_codes: list[str],
+        state: dict[str, Any],
+        skipped: bool = False,
+    ) -> dict[str, Any]:
+        if skipped:
+            return build_validation_state(
+                invoice_id=invoice_id,
+                po_id=po_id,
+                issue_codes=issue_codes,
+                state=state,
+                validation_steps=merge_validation_steps(
+                    state,
+                    line_item_validation=VALIDATION_STEP_SKIPPED,
+                ),
+            )
+
+        mapping_issue_codes = set(
+            issue_codes,
+        ).intersection(
+            LINE_ITEM_PARTIAL_AMOUNT_CODES,
+        )
+        line_step_status = VALIDATION_STEP_PASSED
+
+        if mapping_issue_codes.intersection(
+            {
+                AMBIGUOUS_LINE_MATCH,
+                UNMATCHED_LINE_ITEM,
+            },
+        ):
+            line_step_status = VALIDATION_STEP_WARNING
+        elif mapping_issue_codes:
+            line_step_status = VALIDATION_STEP_FAILED
+
+        validation_steps = merge_validation_steps(
+            state,
+            line_item_validation=line_step_status,
+        )
+
+        if mapping_issue_codes:
+            validation_steps["amount_validation"] = VALIDATION_STEP_PARTIAL
+
+        return build_validation_state(
+            invoice_id=invoice_id,
+            po_id=po_id,
+            issue_codes=issue_codes,
+            state=state,
+            validation_steps=validation_steps,
         )
 
     async def _persist_allocation_candidates(

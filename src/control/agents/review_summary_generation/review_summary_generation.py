@@ -35,9 +35,9 @@ from src.utils.llm_client import (
     generate_review_executive_summary,
 )
 from src.utils.review_summary_language import (
-    clarification_topic_for_issue,
+    build_open_issue_messages,
+    build_vendor_clarification_messages,
     deduplicate_messages,
-    open_issue_message_for_issue,
     recovery_message_for_issue,
     waived_message_for_issue,
 )
@@ -141,9 +141,11 @@ class ReviewSummaryGenerationAgent:
         )
         open_issues = self._build_open_issues(
             invoice_issues=invoice_issues,
+            resolved_po_numbers=resolved_po_numbers,
         )
         vendor_clarifications = self._build_vendor_clarifications(
             invoice_issues=invoice_issues,
+            resolved_po_numbers=resolved_po_numbers,
         )
         executive_summary = self._generate_executive_summary(
             validation_outcome=validation_outcome,
@@ -164,6 +166,13 @@ class ReviewSummaryGenerationAgent:
                 system_recoveries=system_recoveries,
                 open_issues=open_issues,
                 vendor_clarifications=vendor_clarifications,
+                validation_steps=dict(
+                    state.get(
+                        "validation_steps",
+                        {},
+                    )
+                    or {},
+                ),
             ),
         )
 
@@ -313,49 +322,43 @@ class ReviewSummaryGenerationAgent:
     @staticmethod
     def _build_open_issues(
         invoice_issues: list[InvoiceIssueDetailRecord],
+        resolved_po_numbers: list[str],
     ) -> list[str]:
-        messages = [
-            open_issue_message_for_issue(
-                issue.issue_code,
-            )
+        open_issue_codes = [
+            issue.issue_code
             for issue in invoice_issues
             if issue.status
             in (
                 ValidationIssueStatus.OPEN,
                 ValidationIssueStatus.PENDING_REVIEW,
             )
+            and issue.issue_code is not None
         ]
 
-        return deduplicate_messages(
-            messages,
+        return build_open_issue_messages(
+            open_issue_codes,
+            resolved_po_numbers=resolved_po_numbers,
         )
 
     @staticmethod
     def _build_vendor_clarifications(
         invoice_issues: list[InvoiceIssueDetailRecord],
+        resolved_po_numbers: list[str],
     ) -> list[str]:
-        topics: list[str] = []
-
-        for issue in invoice_issues:
-            if issue.status not in (
+        open_issue_codes = [
+            issue.issue_code
+            for issue in invoice_issues
+            if issue.status
+            in (
                 ValidationIssueStatus.OPEN,
                 ValidationIssueStatus.PENDING_REVIEW,
-            ):
-                continue
-
-            topic = clarification_topic_for_issue(
-                issue.issue_code,
             )
+            and issue.issue_code is not None
+        ]
 
-            if topic is None:
-                continue
-
-            topics.append(
-                topic,
-            )
-
-        return deduplicate_messages(
-            topics,
+        return build_vendor_clarification_messages(
+            open_issue_codes,
+            resolved_po_numbers=resolved_po_numbers,
         )
 
     @staticmethod

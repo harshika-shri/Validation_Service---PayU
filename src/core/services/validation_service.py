@@ -28,9 +28,14 @@ class ValidationService:
     async def validate_invoice(
         self,
         invoice_id: UUID,
+        *,
+        skip_if_already_completed: bool = False,
+        force_fresh: bool = False,
     ) -> ValidationStateSchema:
         return await self._workflow_service.run_invoice_validation(
             invoice_id,
+            skip_if_already_completed=skip_if_already_completed,
+            force_fresh=force_fresh,
         )
 
     async def commit_invoice_allocations(

@@ -101,7 +101,9 @@ class BuyerCompanyValidationAgent:
             },
         )
 
-        company = await self._company_repo.get_active_company()
+        company = await self._company_repo.get_for_invoice(
+            invoice_id,
+        )
 
         if company is None:
             logger.warning(
@@ -143,6 +145,14 @@ class BuyerCompanyValidationAgent:
                     company=company,
                 ),
             )
+
+        issue_codes = await self._resolve_cleared_company_issues(
+            invoice_id=invoice_id,
+            extracted=extracted,
+            company=company,
+            pending_issues=pending_issues,
+            issue_codes=issue_codes,
+        )
 
         issue_codes = await self._persist_issues(
             invoice_id=invoice_id,
@@ -435,14 +445,32 @@ class BuyerCompanyValidationAgent:
         ):
             return []
 
+        logger.warning(
+            "Company GSTIN mismatch detected after normalization",
+            extra={
+                "normalized_extracted": normalize_gstin(
+                    extracted_gstin,
+                ),
+                "normalized_master": normalize_gstin(
+                    company.gstin,
+                ),
+                "raw_extracted": extracted_gstin,
+                "raw_master": company.gstin,
+            },
+        )
+
         return [
             PendingIssue(
                 issue_code=COMPANY_GSTIN_MISMATCH,
                 check_name="company_gstin",
                 field_name="company_gstin",
                 issue_type=IssueType.MISMATCH,
-                expected_value=company.gstin,
-                actual_value=extracted_gstin,
+                expected_value=normalize_gstin(
+                    company.gstin,
+                ),
+                actual_value=normalize_gstin(
+                    extracted_gstin,
+                ),
                 description=(
                     "Extracted buyer company GSTIN does not match "
                     "the active company master record."
@@ -684,22 +712,83 @@ class BuyerCompanyValidationAgent:
         self,
         extracted: BuyerCompanyExtractedRecord,
     ) -> list[PendingIssue]:
-        has_bank_data = any(
-            has_text(value)
-            for value in (
-                extracted.bank_account_number,
-                extracted.bank_name,
-                extracted.ifsc_code,
+        return []
+
+    async def _resolve_cleared_company_issues(
+        self,
+        invoice_id: UUID,
+        *,
+        extracted: BuyerCompanyExtractedRecord,
+        company: CompanyRecord,
+        pending_issues: list[PendingIssue],
+        issue_codes: list[str],
+    ) -> list[str]:
+        updated_codes = list(
+            issue_codes,
+        )
+        pending_codes = {
+            pending_issue.issue_code
+            for pending_issue in pending_issues
+        }
+
+        async def _resolve_if_cleared(
+            issue_code: str,
+            *,
+            cleared: bool,
+        ) -> None:
+            if not cleared or issue_code in pending_codes:
+                return
+
+            resolved_count = (
+                await self._validation_issue_repo.mark_issue_resolved(
+                    invoice_id,
+                    issue_code,
+                )
             )
+
+            if resolved_count and issue_code in updated_codes:
+                updated_codes.remove(
+                    issue_code,
+                )
+
+        await _resolve_if_cleared(
+            COMPANY_DETAILS_MISSING,
+            cleared=not self._all_mandatory_fields_missing(
+                extracted=extracted,
+            ),
+        )
+        await _resolve_if_cleared(
+            MISSING_COMPANY_NAME,
+            cleared=has_text(
+                extracted.company_name,
+            ),
+        )
+        await _resolve_if_cleared(
+            COMPANY_NAME_MISMATCH,
+            cleared=COMPANY_NAME_MISMATCH not in pending_codes,
+        )
+        await _resolve_if_cleared(
+            MISSING_COMPANY_GSTIN,
+            cleared=has_text(
+                extracted.gstin,
+            ),
+        )
+        await _resolve_if_cleared(
+            COMPANY_GSTIN_MISMATCH,
+            cleared=COMPANY_GSTIN_MISMATCH not in pending_codes,
+        )
+        await _resolve_if_cleared(
+            MISSING_COMPANY_ADDRESS,
+            cleared=self._has_company_address(
+                extracted,
+            ),
+        )
+        await _resolve_if_cleared(
+            COMPANY_ADDRESS_MISMATCH,
+            cleared=COMPANY_ADDRESS_MISMATCH not in pending_codes,
         )
 
-        if has_bank_data:
-            logger.info(
-                "Skipping buyer bank detail validation; "
-                "company master has no bank reference fields",
-            )
-
-        return []
+        return updated_codes
 
     async def _persist_issues(
         self,

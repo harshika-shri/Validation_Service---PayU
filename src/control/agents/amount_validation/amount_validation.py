@@ -9,8 +9,17 @@ from uuid import UUID
 
 from src.config.settings import settings
 from src.control.validation_flow import (
+    AMOUNT_VALIDATION_FULL,
+    AMOUNT_VALIDATION_PARTIAL,
     preserve_flow_outcome_state,
+    merge_validation_steps,
     should_continue_validation,
+    should_skip_amount_validation,
+    VALIDATION_STEP_FAILED,
+    VALIDATION_STEP_PARTIAL,
+    VALIDATION_STEP_PASSED,
+    VALIDATION_STEP_SKIPPED,
+    VALIDATION_STEP_WARNING,
 )
 from src.data.models.postgres.enums import (
     IssueType,
@@ -187,6 +196,28 @@ class AmountValidationAgent:
             },
         )
 
+        if should_skip_amount_validation(
+            state,
+        ):
+            logger.info(
+                "Skipping amount validation after unresolved PO",
+                extra={
+                    "invoice_id": str(invoice_id),
+                    "flow_outcome": flow_outcome,
+                },
+            )
+            return preserve_flow_outcome_state(
+                invoice_id=invoice_id,
+                po_id=state.get("po_id"),
+                issue_codes=issue_codes,
+                flow_outcome=flow_outcome,
+                state=state,
+                validation_steps=merge_validation_steps(
+                    state,
+                    amount_validation=VALIDATION_STEP_SKIPPED,
+                ),
+            )
+
         if not should_continue_validation(
             state,
         ):
@@ -202,7 +233,20 @@ class AmountValidationAgent:
                 po_id=state.get("po_id"),
                 issue_codes=issue_codes,
                 flow_outcome=flow_outcome,
+                state=state,
+                validation_steps=merge_validation_steps(
+                    state,
+                    amount_validation=VALIDATION_STEP_SKIPPED,
+                ),
             )
+
+        amount_mode = str(
+            state.get(
+                "amount_validation_mode",
+                AMOUNT_VALIDATION_FULL,
+            ),
+        )
+        partial_validation = amount_mode == AMOUNT_VALIDATION_PARTIAL
 
         allocations = (
             await self._allocation_candidate_repo.get_validation_allocations_for_invoice(
@@ -210,7 +254,7 @@ class AmountValidationAgent:
             )
         )
 
-        if not allocations:
+        if not allocations and not partial_validation:
             logger.info(
                 "Skipping amount validation; no allocation candidates found",
                 extra={
@@ -222,6 +266,11 @@ class AmountValidationAgent:
                 po_id=state.get("po_id"),
                 issue_codes=issue_codes,
                 flow_outcome=flow_outcome,
+                state=state,
+                validation_steps=merge_validation_steps(
+                    state,
+                    amount_validation=VALIDATION_STEP_SKIPPED,
+                ),
             )
 
         invoice = await self._invoice_amount_repo.get_by_invoice_id(
@@ -264,82 +313,117 @@ class AmountValidationAgent:
 
         pending_issues: list[PendingIssue] = []
 
-        pending_issues.extend(
-            self._validate_unit_prices(
-                allocations=allocations,
-                line_by_id=line_by_id,
-                po_line_by_id=po_line_by_id,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_line_totals(
-                invoice_lines=invoice_lines,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_allocation_amounts(
-                allocations=allocations,
-                line_by_id=line_by_id,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_line_taxes(
-                allocations=allocations,
-                line_by_id=line_by_id,
-                po_line_by_id=po_line_by_id,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_invoice_tax(
-                invoice=invoice,
-                invoice_lines=invoice_lines,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_subtotal(
-                invoice=invoice,
-                invoice_lines=invoice_lines,
-            ),
-        )
+        if partial_validation:
+            pending_issues.extend(
+                self._validate_line_totals(
+                    invoice_lines=invoice_lines,
+                ),
+            )
+            pending_issues.extend(
+                self._validate_invoice_tax(
+                    invoice=invoice,
+                    invoice_lines=invoice_lines,
+                ),
+            )
+            pending_issues.extend(
+                self._validate_subtotal(
+                    invoice=invoice,
+                    invoice_lines=invoice_lines,
+                ),
+            )
+            invoice_charges = parse_charges_from_notes(
+                invoice.notes,
+            )
+            pending_issues.extend(
+                self._validate_grand_total(
+                    invoice=invoice,
+                    invoice_charges=invoice_charges,
+                ),
+            )
+            pending_issues.extend(
+                self._validate_rounding(
+                    invoice=invoice,
+                    invoice_lines=invoice_lines,
+                    invoice_charges=invoice_charges,
+                ),
+            )
+        else:
+            pending_issues.extend(
+                self._validate_unit_prices(
+                    allocations=allocations,
+                    line_by_id=line_by_id,
+                    po_line_by_id=po_line_by_id,
+                ),
+            )
+            pending_issues.extend(
+                self._validate_line_totals(
+                    invoice_lines=invoice_lines,
+                ),
+            )
+            pending_issues.extend(
+                self._validate_allocation_amounts(
+                    allocations=allocations,
+                    line_by_id=line_by_id,
+                ),
+            )
+            pending_issues.extend(
+                self._validate_line_taxes(
+                    allocations=allocations,
+                    line_by_id=line_by_id,
+                    po_line_by_id=po_line_by_id,
+                ),
+            )
+            pending_issues.extend(
+                self._validate_invoice_tax(
+                    invoice=invoice,
+                    invoice_lines=invoice_lines,
+                ),
+            )
+            pending_issues.extend(
+                self._validate_subtotal(
+                    invoice=invoice,
+                    invoice_lines=invoice_lines,
+                ),
+            )
 
-        invoice_charges = parse_charges_from_notes(
-            invoice.notes,
-        )
-        po_charges = self._aggregate_po_charges(
-            purchase_orders=purchase_orders,
-        )
-
-        pending_issues.extend(
-            self._validate_discounts(
-                invoice=invoice,
+            invoice_charges = parse_charges_from_notes(
+                invoice.notes,
+            )
+            po_charges = self._aggregate_po_charges(
                 purchase_orders=purchase_orders,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_additional_charges(
-                invoice_charges=invoice_charges,
-                po_charges=po_charges,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_charge_mismatches(
-                invoice_charges=invoice_charges,
-                po_charges=po_charges,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_grand_total(
-                invoice=invoice,
-                invoice_charges=invoice_charges,
-            ),
-        )
-        pending_issues.extend(
-            self._validate_rounding(
-                invoice=invoice,
-                invoice_lines=invoice_lines,
-                invoice_charges=invoice_charges,
-            ),
-        )
+            )
+
+            pending_issues.extend(
+                self._validate_discounts(
+                    invoice=invoice,
+                    purchase_orders=purchase_orders,
+                ),
+            )
+            pending_issues.extend(
+                self._validate_additional_charges(
+                    invoice_charges=invoice_charges,
+                    po_charges=po_charges,
+                ),
+            )
+            pending_issues.extend(
+                self._validate_charge_mismatches(
+                    invoice_charges=invoice_charges,
+                    po_charges=po_charges,
+                ),
+            )
+            pending_issues.extend(
+                self._validate_grand_total(
+                    invoice=invoice,
+                    invoice_charges=invoice_charges,
+                ),
+            )
+            pending_issues.extend(
+                self._validate_rounding(
+                    invoice=invoice,
+                    invoice_lines=invoice_lines,
+                    invoice_charges=invoice_charges,
+                ),
+            )
 
         issue_codes = await self._persist_issues(
             invoice_id=invoice_id,
@@ -360,6 +444,11 @@ class AmountValidationAgent:
                 invoice_id,
                 issue_code,
             )
+            issue_codes = [
+                code
+                for code in issue_codes
+                if code != issue_code
+            ]
 
         logger.info(
             "Completed amount validation",
@@ -370,11 +459,27 @@ class AmountValidationAgent:
             },
         )
 
+        amount_step_status = (
+            VALIDATION_STEP_PARTIAL
+            if partial_validation
+            else (
+                VALIDATION_STEP_WARNING
+                if pending_issues
+                else VALIDATION_STEP_PASSED
+            )
+        )
+
         return preserve_flow_outcome_state(
             invoice_id=invoice_id,
             po_id=state.get("po_id"),
             issue_codes=issue_codes,
             flow_outcome=flow_outcome,
+            state=state,
+            amount_validation_mode=amount_mode,
+            validation_steps=merge_validation_steps(
+                state,
+                amount_validation=amount_step_status,
+            ),
         )
 
     def _validate_unit_prices(

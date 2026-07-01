@@ -53,6 +53,18 @@ class Settings(BaseSettings):
         default="extraction.events",
         validation_alias="REDIS_STREAM_NAME",
     )
+    REDIS_STREAM_CONSUMER_GROUP: str = Field(
+        default="validation-service",
+        validation_alias="REDIS_STREAM_CONSUMER_GROUP",
+    )
+    REDIS_STREAM_CONSUMER_NAME: str = Field(
+        default="validation-consumer",
+        validation_alias="REDIS_STREAM_CONSUMER_NAME",
+    )
+    REDIS_STREAM_BATCH_SIZE: int = Field(
+        default=10,
+        validation_alias="REDIS_STREAM_BATCH_SIZE",
+    )
     REDIS_STREAM_BLOCK_MS: int = Field(
         default=5000,
         validation_alias="REDIS_STREAM_BLOCK_MS",
@@ -73,6 +85,10 @@ class Settings(BaseSettings):
     CELERY_TASK_DEFAULT_QUEUE: str = "validation"
     CELERY_TASK_MAX_RETRIES: int = 3
     CELERY_TASK_RETRY_BACKOFF_SECONDS: int = 60
+    VALIDATION_TASK_TIMEOUT_SECONDS: int = Field(
+        default=1800,
+        validation_alias="VALIDATION_TASK_TIMEOUT_SECONDS",
+    )
 
     PO_DATE_WINDOW_DAYS: int = Field(
         default=365,

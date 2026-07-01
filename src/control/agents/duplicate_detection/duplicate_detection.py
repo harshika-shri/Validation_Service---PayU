@@ -20,7 +20,9 @@ from src.control.agents.po_resolution.po_line_matcher import (
 )
 from src.control.validation_flow import (
     preserve_flow_outcome_state,
-    should_continue_validation,
+    merge_validation_steps,
+    VALIDATION_STEP_PASSED,
+    VALIDATION_STEP_WARNING,
 )
 from src.core.services.validation_outcome_service import (
     ValidationOutcomeService,
@@ -122,23 +124,6 @@ class DuplicateDetectionAgent:
                 "flow_outcome": flow_outcome,
             },
         )
-
-        if not should_continue_validation(
-            state,
-        ):
-            logger.info(
-                "Skipping duplicate detection due to flow stop",
-                extra={
-                    "invoice_id": str(invoice_id),
-                    "flow_outcome": flow_outcome,
-                },
-            )
-            return preserve_flow_outcome_state(
-                invoice_id=invoice_id,
-                po_id=state.get("po_id"),
-                issue_codes=issue_codes,
-                flow_outcome=flow_outcome,
-            )
 
         current_invoice = await self._duplicate_repo.get_invoice_by_id(
             invoice_id,
@@ -260,6 +245,15 @@ class DuplicateDetectionAgent:
             po_id=state.get("po_id"),
             issue_codes=issue_codes,
             flow_outcome=flow_outcome,
+            state=state,
+            validation_steps=merge_validation_steps(
+                state,
+                duplicate_detection=(
+                    VALIDATION_STEP_WARNING
+                    if pending_issues
+                    else VALIDATION_STEP_PASSED
+                ),
+            ),
         )
 
     async def _resolve_vendor_id(

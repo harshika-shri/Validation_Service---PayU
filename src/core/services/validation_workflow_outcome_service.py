@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +9,7 @@ from src.core.workflow.validation_event_mapping import (
     map_outcome_to_event_type,
 )
 from src.data.models.postgres.enums import (
+    InvoiceStatus,
     InvoiceValidationDecision,
 )
 from src.data.repositories.invoice_header_resolution.invoice_repository import (
@@ -16,6 +18,8 @@ from src.data.repositories.invoice_header_resolution.invoice_repository import (
 from src.messaging.redis_stream_publisher import (
     queue_validation_event,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ValidationWorkflowOutcomeService:
@@ -47,6 +51,20 @@ class ValidationWorkflowOutcomeService:
 
         event_type = map_outcome_to_event_type(
             validation_outcome,
+        )
+
+        await self.invoice_repo.update_invoice_status(
+            invoice_id,
+            InvoiceStatus.UNDER_REVIEW,
+        )
+
+        logger.info(
+            "Validation finalized invoice_id=%s validation_outcome=%s "
+            "invoice_status=%s event_type=%s",
+            invoice_id,
+            validation_outcome.value,
+            InvoiceStatus.UNDER_REVIEW.value,
+            event_type,
         )
 
         queue_validation_event(

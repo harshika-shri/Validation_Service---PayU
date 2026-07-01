@@ -8,17 +8,8 @@ from sqlalchemy import select
 
 from src.data.models.postgres.invoices import Invoice
 from src.data.repositories.base_repo import BaseRepository
-
-_INVALID_PO_PLACEHOLDERS = frozenset(
-    {
-        "---",
-        "-",
-        "n/a",
-        "na",
-        "none",
-        "null",
-        "nil",
-    },
+from src.utils.po_number_utils import (
+    parse_po_numbers,
 )
 
 
@@ -50,7 +41,7 @@ class InvoicePOResolutionRepository(BaseRepository):
         if row is None:
             return None
 
-        extracted_numbers = self._normalize_po_numbers(
+        extracted_numbers = parse_po_numbers(
             row.po_numbers_extracted,
         )
 
@@ -60,38 +51,3 @@ class InvoicePOResolutionRepository(BaseRepository):
             po_numbers_extracted=extracted_numbers,
         )
 
-    @staticmethod
-    def _normalize_po_numbers(
-        raw_values: object,
-    ) -> list[str]:
-        if raw_values is None:
-            return []
-
-        if not isinstance(
-            raw_values,
-            list,
-        ):
-            return []
-
-        numbers: list[str] = []
-
-        for value in raw_values:
-            if value is None:
-                continue
-
-            normalized = str(
-                value,
-            ).strip()
-
-            if (
-                not normalized
-                or normalized.casefold()
-                in _INVALID_PO_PLACEHOLDERS
-            ):
-                continue
-
-            numbers.append(
-                normalized,
-            )
-
-        return numbers

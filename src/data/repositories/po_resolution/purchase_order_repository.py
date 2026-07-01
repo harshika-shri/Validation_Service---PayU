@@ -5,11 +5,14 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from src.data.models.postgres.enums import PurchaseOrderStatus
 from src.data.models.postgres.purchase_orders import PurchaseOrder
 from src.data.repositories.base_repo import BaseRepository
+from src.utils.po_number_utils import (
+    normalize_po_number_for_lookup,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +34,13 @@ class PurchaseOrderRepository(BaseRepository):
         self,
         po_number: str,
     ) -> PurchaseOrderRecord | None:
+        normalized = normalize_po_number_for_lookup(
+            po_number,
+        )
+
+        if not normalized:
+            return None
+
         stmt = select(
             PurchaseOrder.id,
             PurchaseOrder.po_number,
@@ -43,7 +53,10 @@ class PurchaseOrderRepository(BaseRepository):
             PurchaseOrder.tax_amount,
             PurchaseOrder.discount_amount,
         ).where(
-            PurchaseOrder.po_number == po_number.strip(),
+            func.lower(
+                PurchaseOrder.po_number,
+            )
+            == normalized.casefold(),
         )
 
         result = await self.execute(

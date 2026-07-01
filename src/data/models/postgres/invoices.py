@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Numeric, String, Text
+from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -133,18 +133,6 @@ class Invoice(Base, TimestampMixin):
         nullable=True,
     )
 
-    is_high_value: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        nullable=True,
-    )
-
-    is_partial_invoice: Mapped[bool] = mapped_column(
-        Boolean,
-        default=False,
-        nullable=True,
-    )
-
     assigned_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
         nullable=True,
@@ -160,22 +148,7 @@ class Invoice(Base, TimestampMixin):
         nullable=True,
     )
 
-    hold_reason: Mapped[str | None] = mapped_column(
-        Text,
-        nullable=True,
-    )
-
     rejection_reason: Mapped[str | None] = mapped_column(
         Text,
-        nullable=True,
-    )
-
-    paid_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-
-    paid_by: Mapped[UUID | None] = mapped_column(
-        ForeignKey("users.id"),
         nullable=True,
     )

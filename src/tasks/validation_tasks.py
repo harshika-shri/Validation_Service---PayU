@@ -16,6 +16,9 @@ from src.core.services.validation_workflow_service import (
 from src.schemas.validation_state_schema import (
     ValidationStateSchema,
 )
+from src.messaging.redis_stream_ack import (
+    acknowledge_extraction_stream_message,
+)
 from src.utils.celery_async import run_async_in_worker
 from src.utils.transient_errors import (
     is_permanent_business_error,
@@ -154,12 +157,30 @@ async def _run_invoice_validation(
     session: AsyncSession,
     *,
     invoice_id: UUID,
+    skip_if_already_completed: bool = False,
+    force_fresh: bool = False,
 ) -> ValidationStateSchema:
     service = ValidationWorkflowService(
         session,
     )
 
     return await service.run_invoice_validation(
+        invoice_id=invoice_id,
+        skip_if_already_completed=skip_if_already_completed,
+        force_fresh=force_fresh,
+    )
+
+
+def _maybe_acknowledge_stream_message(
+    *,
+    stream_message_id: str | None,
+    invoice_id: str,
+) -> None:
+    if stream_message_id is None:
+        return
+
+    acknowledge_extraction_stream_message(
+        message_id=stream_message_id,
         invoice_id=invoice_id,
     )
 
@@ -173,12 +194,17 @@ async def _run_invoice_validation(
 def validate_invoice(
     self,
     invoice_id: str,
+    *,
+    skip_if_already_completed: bool = False,
+    force_fresh: bool = False,
+    stream_message_id: str | None = None,
 ) -> dict[str, str | None]:
     task_name = "validate_invoice"
     started_at = _log_task_received(
         task_name,
         self.request.id,
         invoice_id=invoice_id,
+        stream_message_id=stream_message_id,
     )
 
     try:
@@ -193,6 +219,8 @@ def validate_invoice(
                 invoice_id=UUID(
                     invoice_id,
                 ),
+                skip_if_already_completed=skip_if_already_completed,
+                force_fresh=force_fresh,
             ),
         )
 
@@ -206,6 +234,11 @@ def validate_invoice(
             self.request.id,
             started_at=started_at,
             result=result,
+        )
+
+        _maybe_acknowledge_stream_message(
+            stream_message_id=stream_message_id,
+            invoice_id=invoice_id,
         )
 
         return result
@@ -240,6 +273,11 @@ def validate_invoice(
                 "task_id"
             ] = self.request.id
 
+            _maybe_acknowledge_stream_message(
+                stream_message_id=stream_message_id,
+                invoice_id=invoice_id,
+            )
+
             return failure
 
         if (
@@ -268,4 +306,14 @@ def validate_invoice(
             started_at=started_at,
             error=error,
         )
+
+        if (
+            stream_message_id is not None
+            and self.request.retries >= settings.CELERY_TASK_MAX_RETRIES
+        ):
+            _maybe_acknowledge_stream_message(
+                stream_message_id=stream_message_id,
+                invoice_id=invoice_id,
+            )
+
         raise

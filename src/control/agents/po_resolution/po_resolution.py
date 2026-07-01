@@ -16,7 +16,17 @@ from src.control.agents.po_resolution.po_coverage_search import (
 from src.control.agents.po_resolution.po_line_matcher import (
     POLineMatcher,
 )
-from src.control.validation_flow import build_validation_state
+from src.control.validation_flow import (
+    AMOUNT_VALIDATION_PARTIAL,
+    AMOUNT_VALIDATION_SKIP,
+    VALIDATION_STEP_FAILED,
+    VALIDATION_STEP_PARTIAL,
+    VALIDATION_STEP_PASSED,
+    VALIDATION_STEP_SKIPPED,
+    VALIDATION_STEP_WARNING,
+    build_validation_state,
+    merge_validation_steps,
+)
 from src.core.exceptions.validation_exc import InvoiceNotFoundError
 from src.data.models.postgres.enums import (
     IssueType,
@@ -197,6 +207,13 @@ class POResolutionAgent:
             extracted_result.pending_issues,
         )
 
+        active_matched = [
+            purchase_order
+            for purchase_order in extracted_result.matched_pos
+            if purchase_order.status
+            in _ACTIVE_PO_STATUSES
+        ]
+
         invoice_lines = (
             await self._invoice_line_item_repo.get_by_invoice_id(
                 invoice_id,
@@ -255,6 +272,8 @@ class POResolutionAgent:
                 return await self._return_po_resolution_failure(
                     invoice_id=invoice_id,
                     issue_codes=issue_codes,
+                    state=state,
+                    matched_pos=extracted_result.matched_pos,
                 )
 
             pending_issues.append(
@@ -387,6 +406,8 @@ class POResolutionAgent:
             return await self._return_po_resolution_failure(
                 invoice_id=invoice_id,
                 issue_codes=issue_codes,
+                state=state,
+                matched_pos=extracted_result.matched_pos,
             )
 
         search_result = await self._search_po_allocations(
@@ -425,6 +446,8 @@ class POResolutionAgent:
             return await self._return_po_resolution_failure(
                 invoice_id=invoice_id,
                 issue_codes=issue_codes,
+                state=state,
+                matched_pos=extracted_result.matched_pos,
             )
 
         if (
@@ -434,6 +457,36 @@ class POResolutionAgent:
                 search_result=search_result,
             )
         ):
+            if active_matched:
+                resolved_set = frozenset(
+                    purchase_order.id
+                    for purchase_order in active_matched
+                )
+                logger.info(
+                    "Using extracted PO references despite multiple "
+                    "recovery candidates; deferring allocation ambiguity "
+                    "to line item validation",
+                    extra={
+                        "invoice_id": str(invoice_id),
+                        "resolved_po_ids": [
+                            str(po_id)
+                            for po_id in resolved_set
+                        ],
+                    },
+                )
+                return await self._finalize_po_resolution(
+                    invoice_id=invoice_id,
+                    state=state,
+                    resolved_set=resolved_set,
+                    matched_pos=extracted_result.matched_pos,
+                    candidate_pool=candidate_pool,
+                    vendor_master_id=vendor_master_id,
+                    pending_issues=pending_issues,
+                    issue_codes=issue_codes,
+                    po_reference_missing=po_reference_missing,
+                    candidate_type=POResolutionCandidateType.RESOLVED,
+                )
+
             pending_issues.append(
                 PendingIssue(
                     issue_code=PO_AMBIGUOUS,
@@ -471,23 +524,48 @@ class POResolutionAgent:
                 invoice_id=invoice_id,
                 po_id=state.get("po_id"),
                 issue_codes=issue_codes,
+                state=state,
+                amount_validation_mode=AMOUNT_VALIDATION_PARTIAL,
+                skip_line_item_validation=True,
+                validation_steps=merge_validation_steps(
+                    state,
+                    po_resolution=VALIDATION_STEP_WARNING,
+                    line_item_validation=VALIDATION_STEP_SKIPPED,
+                    amount_validation=VALIDATION_STEP_PARTIAL,
+                ),
             )
 
         resolved_set = next(
             iter(solutions),
         )
 
-        recovery_candidate_type = (
-            POResolutionCandidateType.RECOVERED
-            if (
-                po_reference_missing
-                or any(
-                    issue.issue_code
-                    in _RECOVERABLE_PO_ISSUE_CODES
-                    for issue in pending_issues
-                )
+        extracted_active_ids = frozenset(
+            purchase_order.id
+            for purchase_order in active_matched
+        )
+        using_extracted_pos = (
+            not po_reference_missing
+            and bool(
+                extracted_active_ids,
             )
-            else POResolutionCandidateType.RESOLVED
+            and resolved_set == extracted_active_ids
+        )
+
+        recovery_candidate_type = (
+            POResolutionCandidateType.RESOLVED
+            if using_extracted_pos
+            else (
+                POResolutionCandidateType.RECOVERED
+                if (
+                    po_reference_missing
+                    or any(
+                        issue.issue_code
+                        in _RECOVERABLE_PO_ISSUE_CODES
+                        for issue in pending_issues
+                    )
+                )
+                else POResolutionCandidateType.RESOLVED
+            )
         )
 
         return await self._finalize_po_resolution(
@@ -508,15 +586,47 @@ class POResolutionAgent:
         *,
         invoice_id: UUID,
         issue_codes: list[str],
+        state: dict[str, Any] | None = None,
+        matched_pos: list[PurchaseOrderRecord] | None = None,
     ) -> dict[str, Any]:
-        await self._clear_po_resolution_artifacts(
-            invoice_id,
-        )
+        active_matched = [
+            purchase_order
+            for purchase_order in (
+                matched_pos or []
+            )
+            if purchase_order.status
+            in _ACTIVE_PO_STATUSES
+        ]
+
+        if active_matched:
+            await self._create_resolution_groups(
+                invoice_id=invoice_id,
+                solutions={
+                    frozenset(
+                        purchase_order.id
+                        for purchase_order in active_matched
+                    ),
+                },
+                candidate_type=POResolutionCandidateType.RESOLVED,
+            )
+        else:
+            await self._clear_po_resolution_artifacts(
+                invoice_id,
+            )
 
         return build_validation_state(
             invoice_id=invoice_id,
             po_id=None,
             issue_codes=issue_codes,
+            state=state,
+            amount_validation_mode=AMOUNT_VALIDATION_SKIP,
+            skip_line_item_validation=True,
+            validation_steps=merge_validation_steps(
+                state or {},
+                po_resolution=VALIDATION_STEP_FAILED,
+                line_item_validation=VALIDATION_STEP_SKIPPED,
+                amount_validation=VALIDATION_STEP_SKIPPED,
+            ),
         )
 
     async def _clear_po_resolution_artifacts(
@@ -541,6 +651,15 @@ class POResolutionAgent:
         solutions: set[frozenset[UUID]],
         candidate_type: POResolutionCandidateType,
     ) -> None:
+        ordered_solutions = sorted(
+            solutions,
+            key=lambda solution: tuple(
+                sorted(
+                    str(po_id)
+                    for po_id in solution
+                ),
+            ),
+        )
         groups = [
             ResolutionGroupCreate(
                 candidate_type=candidate_type,
@@ -548,8 +667,14 @@ class POResolutionAgent:
                     solution,
                     key=str,
                 ),
+                is_selected=(
+                    index == 0
+                    and len(ordered_solutions) == 1
+                ),
             )
-            for solution in solutions
+            for index, solution in enumerate(
+                ordered_solutions,
+            )
         ]
         await self._resolution_group_repo.replace_groups_for_invoice(
             invoice_id=invoice_id,
@@ -565,13 +690,10 @@ class POResolutionAgent:
         if not po_reference_missing:
             return False
 
-        if search_result.allocation_plan_count > 1:
-            return True
-
-        if len(search_result.po_sets) > 1:
-            return True
-
-        return False
+        # Only multiple distinct PO sets are ambiguous at this stage.
+        # Multiple allocation plans for the same PO set are resolved in
+        # line item validation.
+        return len(search_result.po_sets) > 1
 
     async def _try_direct_extracted_po_resolution(
         self,
@@ -589,17 +711,12 @@ class POResolutionAgent:
         if not active_matched:
             return None
 
-        solutions = await self._find_po_set_solutions(
-            invoice_id=invoice_id,
-            invoice_lines=invoice_lines,
-            candidate_pool=active_matched,
-        )
-
-        if len(solutions) != 1:
-            return None
-
-        return next(
-            iter(solutions),
+        # When extracted PO references exist in the database, PO
+        # resolution accepts them directly. Allocation feasibility and
+        # ambiguity are handled in line item validation.
+        return frozenset(
+            purchase_order.id
+            for purchase_order in active_matched
         )
 
     async def _search_po_allocations(
@@ -775,7 +892,7 @@ class POResolutionAgent:
                     issue_code=PO_RECOVERED,
                     check_name="po_recovery",
                     field_name="po_id",
-                    issue_type=IssueType.MISSING,
+                    issue_type=IssueType.WARNING,
                     expected_value=None,
                     actual_value=None,
                     description=(
@@ -843,6 +960,16 @@ class POResolutionAgent:
             invoice_id=invoice_id,
             po_id=resolved_po_id,
             issue_codes=issue_codes,
+            state=state,
+            validation_steps=merge_validation_steps(
+                state,
+                po_resolution=(
+                    VALIDATION_STEP_WARNING
+                    if candidate_type
+                    == POResolutionCandidateType.RECOVERED
+                    else VALIDATION_STEP_PASSED
+                ),
+            ),
         )
 
     async def _validate_extracted_po_numbers(

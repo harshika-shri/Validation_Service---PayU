@@ -27,20 +27,20 @@ def normalize_gstin(
     value: str,
 ) -> str:
     return re.sub(
-        r"\s+",
+        r"[^A-Z0-9]",
         "",
-        value.strip(),
-    ).upper()
+        value.strip().upper(),
+    )
 
 
 def normalize_pan(
     value: str,
 ) -> str:
     return re.sub(
-        r"\s+",
+        r"[^A-Z0-9]",
         "",
-        value.strip(),
-    ).upper()
+        value.strip().upper(),
+    )
 
 
 def normalize_email(

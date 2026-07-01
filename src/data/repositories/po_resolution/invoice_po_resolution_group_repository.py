@@ -160,6 +160,46 @@ class InvoicePOResolutionGroupRepository(BaseRepository):
 
         return group.po_ids
 
+    async def update_single_group_po_ids(
+        self,
+        invoice_id: UUID,
+        *,
+        po_ids: list[UUID],
+        candidate_type: POResolutionCandidateType | None = None,
+    ) -> ResolutionGroupRecord | None:
+        groups = await self.get_groups_for_invoice(
+            invoice_id,
+        )
+
+        if len(
+            groups,
+        ) != 1:
+            return None
+
+        group = groups[0]
+        resolved_type = (
+            candidate_type
+            if candidate_type is not None
+            else group.candidate_type
+        )
+
+        records = await self.replace_groups_for_invoice(
+            invoice_id=invoice_id,
+            groups=[
+                ResolutionGroupCreate(
+                    candidate_type=resolved_type,
+                    po_ids=sorted(
+                        po_ids,
+                        key=str,
+                    ),
+                    confidence_score=group.confidence_score,
+                    is_selected=group.is_selected,
+                ),
+            ],
+        )
+
+        return records[0] if records else None
+
     async def select_group(
         self,
         invoice_id: UUID,

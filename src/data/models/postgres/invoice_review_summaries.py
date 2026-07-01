@@ -49,6 +49,12 @@ class InvoiceReviewSummary(Base):
         nullable=False,
     )
 
+    validation_steps_json: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default="{}",
+    )
+
     generated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

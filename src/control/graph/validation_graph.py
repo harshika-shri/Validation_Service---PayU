@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Literal, cast
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
 from src.control.agents.amount_validation.amount_validation import (
@@ -37,27 +38,22 @@ from src.control.graph.validation_state import (
     FLOW_OUTCOME_CONTINUE,
     FLOW_OUTCOME_END,
     FLOW_OUTCOME_REJECT,
-    FLOW_OUTCOME_REROUTE,
-    MAX_PO_REROUTE_COUNT,
     ValidationState,
 )
 from src.control.validation_flow import (
-    MISSING_PO_COVERAGE,
+    AMOUNT_VALIDATION_SKIP,
     PO_UNRESOLVED,
+    merge_validation_steps,
+    should_skip_amount_validation,
 )
 from src.data.models.postgres.enums import (
-    IssueType,
     ValidationFlowOutcome,
-    ValidationIssueStatus,
 )
 from src.data.repositories.shared.validation_issue_repository import (
-    ValidationIssueCreate,
     ValidationIssueRepository,
 )
 
 logger = logging.getLogger(__name__)
-
-CHECK_STAGE = "validation_graph"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +72,8 @@ class ValidationAgents:
 def build_validation_graph(
     agents: ValidationAgents,
     validation_issue_repo: ValidationIssueRepository,
+    *,
+    checkpointer: BaseCheckpointSaver | None = None,
 ):
     graph = StateGraph(
         ValidationState,
@@ -184,107 +182,6 @@ def build_validation_graph(
             "flow_outcome": FLOW_OUTCOME_END,
         }
 
-    async def prepare_po_reroute_node(
-        state: ValidationState,
-    ) -> ValidationState:
-        reroute_count = state.get(
-            "po_reroute_count",
-            0,
-        ) + 1
-
-        logger.info(
-            "Re-route Triggered",
-            extra={
-                "invoice_id": str(
-                    state["invoice_id"],
-                ),
-                "issue_code": MISSING_PO_COVERAGE,
-                "po_reroute_count": reroute_count,
-            },
-        )
-
-        return {
-            **state,
-            "po_reroute_count": reroute_count,
-        }
-
-    async def handle_reroute_limit_node(
-        state: ValidationState,
-    ) -> ValidationState:
-        invoice_id = state["invoice_id"]
-        issue_codes = list(
-            state.get(
-                "issue_codes",
-                [],
-            ),
-        )
-
-        logger.warning(
-            "Re-route limit exceeded",
-            extra={
-                "invoice_id": str(
-                    invoice_id,
-                ),
-                "po_reroute_count": state.get(
-                    "po_reroute_count",
-                    0,
-                ),
-                "max_po_reroute_count": MAX_PO_REROUTE_COUNT,
-            },
-        )
-
-        if PO_UNRESOLVED not in issue_codes:
-            await validation_issue_repo.create_issue(
-                invoice_id=invoice_id,
-                issue=ValidationIssueCreate(
-                    check_stage=CHECK_STAGE,
-                    check_name="po_reroute_limit",
-                    field_name="po_id",
-                    issue_type=IssueType.MISSING,
-                    issue_code=PO_UNRESOLVED,
-                    expected_value=None,
-                    actual_value=None,
-                    description=(
-                        "PO re-route limit exceeded while resolving "
-                        "missing purchase order coverage."
-                    ),
-                    status=ValidationIssueStatus.OPEN,
-                ),
-            )
-            issue_codes.append(
-                PO_UNRESOLVED,
-            )
-
-            logger.info(
-                "Issues Added",
-                extra={
-                    "invoice_id": str(
-                        invoice_id,
-                    ),
-                    "node": "handle_reroute_limit",
-                    "issue_codes": [
-                        PO_UNRESOLVED,
-                    ],
-                },
-            )
-
-        logger.info(
-            "Hard Stop Triggered",
-            extra={
-                "invoice_id": str(
-                    invoice_id,
-                ),
-                "node": "handle_reroute_limit",
-                "flow_outcome": FLOW_OUTCOME_REJECT,
-            },
-        )
-
-        return {
-            **state,
-            "issue_codes": issue_codes,
-            "flow_outcome": ValidationFlowOutcome.HARD_STOP.value,
-        }
-
     graph.add_node(
         "invoice_header_resolution",
         invoice_header_resolution_node,
@@ -321,14 +218,6 @@ def build_validation_graph(
         "review_summary_generation",
         review_summary_generation_node,
     )
-    graph.add_node(
-        "prepare_po_reroute",
-        prepare_po_reroute_node,
-    )
-    graph.add_node(
-        "handle_reroute_limit",
-        handle_reroute_limit_node,
-    )
 
     graph.add_edge(
         START,
@@ -347,7 +236,7 @@ def build_validation_graph(
         _route_after_vendor,
         {
             "po_resolution": "po_resolution",
-            "final_decision": "final_decision",
+            "duplicate_detection": "duplicate_detection",
         },
     )
     graph.add_conditional_edges(
@@ -355,7 +244,8 @@ def build_validation_graph(
         _route_after_po_resolution,
         {
             "line_item_validation": "line_item_validation",
-            "final_decision": "final_decision",
+            "amount_validation": "amount_validation",
+            "duplicate_detection": "duplicate_detection",
         },
     )
     graph.add_conditional_edges(
@@ -363,18 +253,8 @@ def build_validation_graph(
         _route_after_line_item_validation,
         {
             "amount_validation": "amount_validation",
-            "prepare_po_reroute": "prepare_po_reroute",
-            "handle_reroute_limit": "handle_reroute_limit",
-            "final_decision": "final_decision",
+            "duplicate_detection": "duplicate_detection",
         },
-    )
-    graph.add_edge(
-        "prepare_po_reroute",
-        "po_resolution",
-    )
-    graph.add_edge(
-        "handle_reroute_limit",
-        "final_decision",
     )
     graph.add_conditional_edges(
         "amount_validation",
@@ -400,7 +280,9 @@ def build_validation_graph(
         END,
     )
 
-    return graph.compile()
+    return graph.compile(
+        checkpointer=checkpointer,
+    )
 
 
 async def _run_agent_node(
@@ -510,6 +392,23 @@ def cast_validation_state(
                     0,
                 ),
             ),
+            "amount_validation_mode": state.get(
+                "amount_validation_mode",
+                "full",
+            ),
+            "skip_line_item_validation": bool(
+                state.get(
+                    "skip_line_item_validation",
+                    False,
+                ),
+            ),
+            "validation_steps": dict(
+                state.get(
+                    "validation_steps",
+                    {},
+                )
+                or {},
+            ),
             "open_issue_codes": list(
                 state.get(
                     "open_issue_codes",
@@ -540,13 +439,6 @@ def _normalize_flow_outcome(
         return FLOW_OUTCOME_REJECT
 
     if flow_outcome in {
-        ValidationFlowOutcome.REROUTE.value,
-        FLOW_OUTCOME_REROUTE,
-        "REROUTE",
-    }:
-        return FLOW_OUTCOME_REROUTE
-
-    if flow_outcome in {
         FLOW_OUTCOME_END,
         "END",
     }:
@@ -568,27 +460,15 @@ def _is_reject(
     )
 
 
-def _is_reroute(
-    state: ValidationState,
-) -> bool:
-    return (
-        _normalize_flow_outcome(
-            state.get(
-                "flow_outcome",
-            ),
-        )
-        == FLOW_OUTCOME_REROUTE
-    )
-
-
 def _route_after_vendor(
     state: ValidationState,
-) -> Literal["po_resolution", "final_decision"]:
+) -> Literal["po_resolution", "duplicate_detection"]:
     if _is_reject(
         state,
     ):
         logger.info(
-            "Hard Stop Triggered",
+            "Vendor hard stop encountered; continuing to PO resolution "
+            "so extracted PO references can still be linked",
             extra={
                 "invoice_id": str(
                     state["invoice_id"],
@@ -596,14 +476,51 @@ def _route_after_vendor(
                 "node": "vendor_resolution",
             },
         )
-        return "final_decision"
 
     return "po_resolution"
 
 
 def _route_after_po_resolution(
     state: ValidationState,
-) -> Literal["line_item_validation", "final_decision"]:
+) -> Literal["line_item_validation", "amount_validation", "duplicate_detection"]:
+    if should_skip_amount_validation(
+        state,
+    ) or (
+        _is_reject(
+            state,
+        )
+        and PO_UNRESOLVED
+        in state.get(
+            "issue_codes",
+            [],
+        )
+    ):
+        logger.info(
+            "Skipping line item and amount validation after unresolved PO",
+            extra={
+                "invoice_id": str(
+                    state["invoice_id"],
+                ),
+                "node": "po_resolution",
+            },
+        )
+        return "duplicate_detection"
+
+    if state.get(
+        "skip_line_item_validation",
+        False,
+    ):
+        logger.info(
+            "Skipping line item validation after ambiguous PO resolution",
+            extra={
+                "invoice_id": str(
+                    state["invoice_id"],
+                ),
+                "node": "po_resolution",
+            },
+        )
+        return "amount_validation"
+
     if _is_reject(
         state,
     ):
@@ -616,7 +533,7 @@ def _route_after_po_resolution(
                 "node": "po_resolution",
             },
         )
-        return "final_decision"
+        return "duplicate_detection"
 
     return "line_item_validation"
 
@@ -625,9 +542,7 @@ def _route_after_line_item_validation(
     state: ValidationState,
 ) -> Literal[
     "amount_validation",
-    "prepare_po_reroute",
-    "handle_reroute_limit",
-    "final_decision",
+    "duplicate_detection",
 ]:
     if _is_reject(
         state,
@@ -641,34 +556,14 @@ def _route_after_line_item_validation(
                 "node": "line_item_validation",
             },
         )
-        return "final_decision"
-
-    if (
-        _is_reroute(
-            state,
-        )
-        and MISSING_PO_COVERAGE
-        in state.get(
-            "issue_codes",
-            [],
-        )
-    ):
-        reroute_count = state.get(
-            "po_reroute_count",
-            0,
-        )
-
-        if reroute_count >= MAX_PO_REROUTE_COUNT:
-            return "handle_reroute_limit"
-
-        return "prepare_po_reroute"
+        return "duplicate_detection"
 
     return "amount_validation"
 
 
 def _route_after_amount_validation(
     state: ValidationState,
-) -> Literal["duplicate_detection", "final_decision"]:
+) -> Literal["duplicate_detection"]:
     if _is_reject(
         state,
     ):
@@ -681,7 +576,6 @@ def _route_after_amount_validation(
                 "node": "amount_validation",
             },
         )
-        return "final_decision"
 
     return "duplicate_detection"
 

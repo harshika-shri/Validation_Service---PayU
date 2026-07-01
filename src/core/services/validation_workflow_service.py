@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,11 +33,15 @@ from src.control.agents.review_summary_generation.review_summary_generation impo
 from src.control.agents.vendor_resolution.vendor_resolution import (
     VendorResolutionAgent,
 )
+from src.control.graph.checkpointer import (
+    get_validation_checkpointer,
+)
 from src.control.graph.validation_graph import (
     ValidationAgents,
     build_validation_graph,
 )
 from src.control.graph.validation_state import (
+    FLOW_OUTCOME_END,
     ValidationState,
 )
 from src.core.services.validation_outcome_service import (
@@ -106,6 +112,20 @@ from src.schemas.validation_state_schema import (
     ValidationStateSchema,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _is_workflow_complete(
+    values: dict[str, Any] | None,
+) -> bool:
+    if not values:
+        return False
+
+    if values.get("flow_outcome") == FLOW_OUTCOME_END:
+        return True
+
+    return values.get("decision") is not None
+
 
 class ValidationWorkflowService:
     def __init__(
@@ -117,11 +137,42 @@ class ValidationWorkflowService:
     async def run_invoice_validation(
         self,
         invoice_id: UUID,
+        *,
+        skip_if_already_completed: bool = False,
+        force_fresh: bool = False,
     ) -> ValidationStateSchema:
+        thread_id = str(invoice_id)
+        config = {
+            "configurable": {
+                "thread_id": thread_id,
+            },
+        }
+
+        checkpointer = await get_validation_checkpointer()
         agents, validation_issue_repo = self._build_agents()
         graph = build_validation_graph(
             agents=agents,
             validation_issue_repo=validation_issue_repo,
+            checkpointer=checkpointer,
+        )
+
+        snapshot = await graph.aget_state(config)
+        checkpoint_values = dict(snapshot.values or {})
+        resume_from_checkpoint = bool(snapshot.next)
+        already_completed = _is_workflow_complete(
+            checkpoint_values,
+        )
+        skipped_completed = False
+
+        logger.info(
+            "Validation workflow started",
+            extra={
+                "invoice_id": thread_id,
+                "thread_id": thread_id,
+                "resume_from_checkpoint": resume_from_checkpoint,
+                "already_completed": already_completed,
+                "force_fresh": force_fresh,
+            },
         )
 
         initial_state: ValidationState = {
@@ -130,18 +181,70 @@ class ValidationWorkflowService:
             "issue_codes": [],
             "flow_outcome": ValidationFlowOutcome.CONTINUE.value,
             "po_reroute_count": 0,
+            "amount_validation_mode": "full",
+            "skip_line_item_validation": False,
+            "validation_steps": {},
         }
 
-        final_state = await graph.ainvoke(
-            initial_state,
-        )
+        try:
+            if force_fresh:
+                await checkpointer.adelete_thread(thread_id)
+                final_state = await graph.ainvoke(
+                    initial_state,
+                    config=config,
+                )
+            elif resume_from_checkpoint:
+                logger.info(
+                    "Validation workflow resuming from checkpoint",
+                    extra={
+                        "invoice_id": thread_id,
+                        "thread_id": thread_id,
+                        "next_nodes": list(snapshot.next),
+                    },
+                )
+                final_state = await graph.ainvoke(
+                    None,
+                    config=config,
+                )
+            elif skip_if_already_completed and already_completed:
+                skipped_completed = True
+                logger.info(
+                    "Validation already completed; skipping re-execution",
+                    extra={
+                        "invoice_id": thread_id,
+                        "thread_id": thread_id,
+                    },
+                )
+                final_state = checkpoint_values
+            else:
+                final_state = await graph.ainvoke(
+                    initial_state,
+                    config=config,
+                )
+
+            logger.info(
+                "Validation workflow completed successfully",
+                extra={
+                    "invoice_id": thread_id,
+                    "thread_id": thread_id,
+                    "skipped_completed": skipped_completed,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Validation workflow interrupted; checkpoint preserved for resume",
+                extra={
+                    "invoice_id": thread_id,
+                    "thread_id": thread_id,
+                },
+            )
+            raise
 
         schema = validation_state_to_schema(
             dict(
                 final_state,
             ),
         )
-
         if schema.decision is not None:
             workflow_outcome_service = ValidationWorkflowOutcomeService(
                 self._session,
@@ -214,6 +317,7 @@ class ValidationWorkflowService:
             invoice_repo=invoice_repo,
             resolution_group_repo=resolution_group_repo,
             allocation_candidate_repo=allocation_candidate_repo,
+            validation_issue_repo=validation_issue_repo,
         )
 
         agents = ValidationAgents(

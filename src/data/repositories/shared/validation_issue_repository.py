@@ -15,20 +15,14 @@ from src.data.models.postgres.invoice_validation_issues import (
 )
 from src.data.repositories.base_repo import BaseRepository
 
+from src.constants.validation_issue_codes import RECOVERABLE_ISSUE_CODES
+
 _ACTIVE_ISSUE_STATUSES = (
     ValidationIssueStatus.OPEN,
     ValidationIssueStatus.PENDING_REVIEW,
 )
 
-RECOVERABLE_ISSUE_CODES = frozenset(
-    {
-        "MISSING_INVOICE_NUMBER",
-        "VENDOR_NOT_FOUND",
-        "PO_MISSING",
-        "PO_RECOVERED",
-        "INVALID_PO_REFERENCE",
-    },
-)
+RECOVERABLE_ISSUE_CODES = RECOVERABLE_ISSUE_CODES
 
 
 @dataclass(frozen=True, slots=True)

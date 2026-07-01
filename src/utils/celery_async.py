@@ -6,9 +6,13 @@ from typing import TypeVar
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.control.graph.checkpointer import (
+    shutdown_validation_checkpointer,
+)
 from src.data.clients.postgres_client import (
     dispose_engine,
     get_session_factory,
+    reset_engine,
 )
 from src.messaging.post_commit import (
     discard_pending_validation_events,
@@ -42,6 +46,8 @@ async def run_with_db_session(
                 raise
     finally:
         await dispose_engine()
+        await shutdown_validation_checkpointer()
+        reset_engine()
 
 
 def run_async_in_worker(

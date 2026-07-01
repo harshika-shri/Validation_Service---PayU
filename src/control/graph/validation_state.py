@@ -10,6 +10,9 @@ class ValidationState(TypedDict, total=False):
     issue_codes: list[str]
     flow_outcome: str | None
     po_reroute_count: int
+    amount_validation_mode: str
+    skip_line_item_validation: bool
+    validation_steps: dict[str, str]
     open_issue_codes: list[str]
     decision: str | None
     invoice_status: str | None
